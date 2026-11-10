@@ -222,6 +222,7 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
                         await active_pg.bring_to_front()
                         await asyncio.sleep(1.5)
                     active_pg = await bp.manejar_redireccion_externa(active_pg)
+                active_pg, _auth_ok, _auth_mot = await bp.manejar_autenticacion_portal(active_pg, title[:35], solo_auto=True)
             except Exception:
                 pass
 
@@ -232,12 +233,12 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
                     const hasModal = document.querySelectorAll('dialog[open], div.jobs-easy-apply-modal, div[data-test-modal], #form-postulation-questions, form#formularioPreguntasOferta').length > 0;
                     const hasPass = Array.from(document.querySelectorAll('input[type="password"]')).some(e => e.offsetParent !== null);
                     const hasCaptcha = Array.from(document.querySelectorAll('iframe')).some(f => /turnstile|recaptcha|hcaptcha|challenges\.cloudflare/i.test(f.src || ''));
-                    const editable = Array.from(document.querySelectorAll('textarea, input[type="text"]:not([id*="search"]):not([id*="react-select"]), input[type="email"]')).filter(e => e.offsetParent !== null && !e.readOnly && !e.disabled).length;
+                    const editable = Array.from(document.querySelectorAll('textarea, input[type="text"]:not([id*="search"]):not([id*="react-select"]), input[type="email"], input[type="file"]')).filter(e => (e.offsetParent !== null || e.type === 'file') && !e.readOnly && !e.disabled).length;
                     const sendBtns = Array.from(document.querySelectorAll('button, input[type="submit"]')).filter(e => {
                         if (e.offsetParent === null) return false;
                         if (e.closest('#supportModal, .modal:not(.show), [aria-hidden="true"], header, nav, footer')) return false;
                         const t = (e.innerText || e.value || '').trim().toLowerCase();
-                        return t === 'postular' || t.includes('enviar solicitud') || t.includes('enviar postulación') || t === 'enviar' || t === 'postularme' || t.includes('finalizar postulación');
+                        return t === 'postular' || t.includes('enviar solicitud') || t.includes('enviar postulación') || t === 'enviar' || t === 'postularme' || t.includes('finalizar postulación') || t === 'continuar' || t === 'siguiente' || t.includes('guardar y continuar');
                     }).length;
                     return { body_low: bt.slice(0, 5000), has_modal: hasModal, has_password: hasPass, has_captcha: hasCaptcha, editable_inputs: editable, has_send_btn: sendBtns > 0 };
                 }''')

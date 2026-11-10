@@ -1294,7 +1294,6 @@ async def manejar_redireccion_externa(page):
                 "a:has-text('Rellenar automáticamente con currículo')",
                 "button:has-text('Rellenar automáticamente con currículo')",
                 "a:has-text('Autofill with Resume')",
-                "button[data-automation-id='SignInWithEmailButton']",
                 "button:has-text('Solicitar ahora')",
                 "a:has-text('Solicitar ahora')",
                 "button:has-text('Postular ahora')",
@@ -1359,6 +1358,238 @@ async def manejar_redireccion_externa(page):
             break
 
     return page
+
+
+async def manejar_autenticacion_portal(page, empresa: str = "", solo_auto: bool = False):
+    """
+    Maneja el inicio de sesión o creación de cuenta en portales externos siguiendo el orden solicitado:
+    1) Botón de Google -> elegir correof1553@gmail.com -> 'Probar otro método' (hasta 2 veces) -> correo/celular o 'Continuar'.
+    2) Si no hay OAuth Google o sigue pidiendo acceso: correo correof1553@gmail.com + autocompletado Bitwarden/Brave.
+    3) Si aún requiere intervención humana (clave/2FA), pausa interactiva en Brave salvo en modo `solo_auto`.
+    """
+    browser = page.context.browser if page and page.context else None
+    u_low = (page.url or "").lower()
+
+    # En Workday, esperar brevemente a que React monte los botones de SSO o el input de archivo
+    if "myworkdayjobs.com" in u_low and "/apply" in u_low:
+        for _ in range(8):
+            try:
+                listo = await page.locator(
+                    "button[data-automation-id='GoogleSignInButton'], button[data-automation-id='SignInWithEmailButton'], input[type='file'], input[data-automation-id='email']"
+                ).count() > 0
+                if listo:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+    # Detectar si realmente estamos en un contexto de autenticación/SSO
+    try:
+        ctx_auth = await page.evaluate(r'''() => {
+            const u = location.href.toLowerCase();
+            const bt = (document.body?.innerText || '').toLowerCase().slice(0, 5000);
+            const gBtn = !!document.querySelector("button[data-automation-id='GoogleSignInButton']");
+            const eBtn = !!document.querySelector("button[data-automation-id='SignInWithEmailButton']");
+            const hasPass = Array.from(document.querySelectorAll('input[type="password"]')).some(e => e.offsetParent !== null);
+            const hasFile = document.querySelectorAll("input[type='file']").length > 0;
+            const txtAuth = ['iniciar sesión', 'inicia sesión', 'crear cuenta', 'sign in', 'create account', 'conexión con google', 'acceder con google', 'elige una cuenta'].some(k => bt.includes(k));
+            return { isGoogle: u.includes('accounts.google.com'), gBtn, eBtn, hasPass, hasFile, txtAuth, u };
+        }''')
+    except Exception:
+        return page, True, "no_requiere_login"
+
+    es_auth = (
+        ctx_auth["isGoogle"]
+        or ctx_auth["gBtn"]
+        or ctx_auth["eBtn"]
+        or (ctx_auth["hasPass"] and not ctx_auth["hasFile"])
+        or (ctx_auth["txtAuth"] and not ctx_auth["hasFile"] and ("myworkdayjobs.com" in ctx_auth["u"] or "login" in ctx_auth["u"] or "iniciar" in ctx_auth["u"]))
+    )
+    if not es_auth:
+        return page, True, "no_requiere_login"
+
+    # PRIORIDAD 1: Botón de Iniciar / Conectar con Google
+    if not ctx_auth["isGoogle"]:
+        g_selectors = [
+            "button[data-automation-id='GoogleSignInButton']",
+            "button:has-text('Conexión con Google')",
+            "button:has-text('Continuar con Google')",
+            "a:has-text('Continuar con Google')",
+            "button:has-text('Iniciar sesión con Google')",
+            "a:has-text('Iniciar sesión con Google')",
+            "button:has-text('Sign in with Google')",
+            "a:has-text('Sign in with Google')",
+        ]
+        for sel in g_selectors:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    en_footer = await loc.evaluate("el => !!el.closest('footer, #autopostula-root-container')")
+                    if en_footer:
+                        continue
+                    print("🔐 Prioridad 1: Pulsando inicio de sesión con Google...")
+                    hablar("Iniciando acceso con Google para usar correo f 1 5 5 3.")
+                    tabs_antes = list(page.context.pages)
+                    await loc.scroll_into_view_if_needed()
+                    await loc.click(timeout=5000)
+                    await asyncio.sleep(4.0)
+                    tabs_despues = list(page.context.pages)
+                    if len(tabs_despues) > len(tabs_antes):
+                        pop = [t for t in tabs_despues if t not in tabs_antes][-1]
+                        try:
+                            await pop.wait_for_load_state("domcontentloaded", timeout=12000)
+                        except Exception:
+                            pass
+                        page = pop
+                        await page.bring_to_front()
+                        await inyectar_boton_flotante_control(page)
+                    break
+            except Exception:
+                pass
+
+    # Paso B: Flujo automatizado dentro de accounts.google.com
+    intentos_otro_metodo = 0
+    for _paso_g in range(8):
+        if "accounts.google.com" not in (page.url or "").lower():
+            break
+
+        # 1. Selector de cuenta -> correof1553@gmail.com
+        try:
+            acc = page.locator("[data-identifier='correof1553@gmail.com'], [data-email='correof1553@gmail.com']").first
+            if await acc.count() > 0 and await acc.is_visible():
+                print("📧 Google SSO: seleccionando correof1553@gmail.com...")
+                await acc.click(timeout=5000)
+                await asyncio.sleep(3.5)
+                continue
+        except Exception:
+            pass
+
+        # 2. Pantalla de consentimiento / 'Te damos la bienvenida nuevamente' -> 'Continuar'
+        try:
+            btn_cont = page.locator("button:has-text('Continuar'), button:has-text('Continue'), button:has-text('Permitir'), button:has-text('Allow')").first
+            if await btn_cont.count() > 0 and await btn_cont.is_visible():
+                print("✅ Google SSO: confirmando 'Continuar' para volver al portal...")
+                await btn_cont.click(timeout=5000)
+                await asyncio.sleep(4.5)
+                continue
+        except Exception:
+            pass
+
+        # 3. Opciones de verificación alternativa: priorizar correo de recuperación o teléfono/SMS si está en lista selection
+        try:
+            bt_g = (await page.inner_text("body") or "").lower()
+            if "elige" in bt_g or "verific" in bt_g or "obtén un código" in bt_g:
+                alt_loc = page.locator("li:has-text('correo'), li:has-text('correof1553'), li:has-text('dhanielgueta'), div[role='link']:has-text('correo'), li:has-text('teléfono'), li:has-text('celular'), li:has-text('8528'), li:has-text('mensaje de texto')").first
+                if await alt_loc.count() > 0 and await alt_loc.is_visible():
+                    txt_alt = (await alt_loc.inner_text() or "").strip().replace("\n", " ")
+                    print(f"📲 Google 2FA/Alternativa: eligiendo '{txt_alt[:50]}'...")
+                    await alt_loc.click(timeout=5000)
+                    await asyncio.sleep(3.5)
+                    continue
+        except Exception:
+            pass
+
+        # 4. Si pide contraseña en Google: dar margen a Bitwarden/Brave; si sigue vacía, pulsar 'Probar otro método' hasta 2 veces
+        try:
+            pwd_loc = page.locator("input[type='password']:visible").first
+            if await pwd_loc.count() > 0:
+                await pwd_loc.focus()
+                await asyncio.sleep(1.5)
+                cur_pwd = await pwd_loc.input_value()
+                if cur_pwd:
+                    sig = page.locator("button:has-text('Siguiente'), button:has-text('Next')").first
+                    if await sig.count() > 0:
+                        await sig.click(timeout=5000)
+                        await asyncio.sleep(4.0)
+                        continue
+        except Exception:
+            pass
+
+        if intentos_otro_metodo < 2:
+            try:
+                otro_btn = page.locator("div[role='link']:has-text('Probar otro método'), li:has-text('Probar otro método'), button:has-text('Probar otro método'), button:has-text('Probar otra manera'), button:has-text('Try another way')").first
+                if await otro_btn.count() > 0 and await otro_btn.is_visible():
+                    intentos_otro_metodo += 1
+                    print(f"🔀 Google: pulsando 'Probar otro método' ({intentos_otro_metodo}/2)...")
+                    await otro_btn.click(timeout=5000)
+                    await asyncio.sleep(3.5)
+                    continue
+            except Exception:
+                pass
+        break
+
+    # Si Google redirigió de vuelta a Workday u otro portal, esperar carga de formularios
+    if "myworkdayjobs.com" in (page.url or "").lower():
+        await asyncio.sleep(2.5)
+
+    # PRIORIDAD 2: Si no se logró con Google (o el portal usa correo/clave propio como TrabajaEnElChile / iCIMS / Workday Email)
+    try:
+        sign_email_btn = page.locator("button[data-automation-id='SignInWithEmailButton']").first
+        if await sign_email_btn.count() > 0 and await sign_email_btn.is_visible():
+            print("📧 Pulsando 'Conexión con correo electrónico' como respaldo...")
+            await sign_email_btn.click(timeout=4000)
+            await asyncio.sleep(2.5)
+    except Exception:
+        pass
+
+    await autocompletar_datos_personales_y_cv(page)
+
+    # Intentar Bitwarden / gestor de contraseñas guardado en Brave si hay input password visible
+    try:
+        pwd_portal = page.locator("input[type='password']:visible").first
+        if await pwd_portal.count() > 0:
+            await pwd_portal.click(timeout=2000)
+            await asyncio.sleep(2.0)
+            val_pwd = await pwd_portal.input_value()
+            if val_pwd:
+                btn_login = page.locator("button[data-automation-id='signInSubmitButton'], button:has-text('Conectar'), button:has-text('INICIAR SESIÓN'), button:has-text('Iniciar sesión'), button:has-text('Sign in'), button:has-text('Siguiente')").first
+                if await btn_login.count() > 0 and await btn_login.is_visible():
+                    print("🔓 Clave autocompletada por navegador/Bitwarden. Pulsando acceso...")
+                    await btn_login.click(timeout=5000)
+                    await asyncio.sleep(4.0)
+    except Exception:
+        pass
+
+    # Verificar si ya superó el muro de acceso
+    try:
+        sigue_bloqueado = await page.evaluate(r'''() => {
+            const u = location.href.toLowerCase();
+            if (u.includes('accounts.google.com')) return true;
+            const hasPass = Array.from(document.querySelectorAll('input[type="password"]')).some(e => e.offsetParent !== null);
+            const hasFile = document.querySelectorAll("input[type='file']").length > 0;
+            const hasEmailLogin = !!document.querySelector("button[data-automation-id='GoogleSignInButton'], button[data-automation-id='SignInWithEmailButton']");
+            return hasEmailLogin || (hasPass && !hasFile);
+        }''')
+    except Exception:
+        sigue_bloqueado = False
+
+    if not sigue_bloqueado:
+        return page, True, "autenticado_ok"
+
+    if solo_auto:
+        return page, False, "requiere_login_manual"
+
+    # PRIORIDAD 3: Pausar en pantalla para que el usuario aplique Bitwarden / código por correo o celular / Crear cuenta y pulse Reanudar
+    GLOBAL_BOT_CONTROL["paused"] = True
+    GLOBAL_BOT_CONTROL["timer_text"] = "PAUSA"
+    traer_brave_al_frente()
+    if browser:
+        await sincronizar_widgets_navegador(browser)
+    msg_auth = f"Acceso preparado con correo f 1 5 5 3 en {empresa}. Completa tu contraseña de Bitwarden o el código en pantalla y pulsa Reanudar Bot."
+    print(f"\n🔐 {msg_auth}")
+    hablar(msg_auth)
+
+    while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"]:
+        if browser:
+            await sincronizar_widgets_navegador(browser)
+        await asyncio.sleep(0.6)
+
+    if GLOBAL_BOT_CONTROL["stop"]:
+        return page, False, "stop"
+
+    await asyncio.sleep(2.0)
+    await inyectar_boton_flotante_control(page)
+    return page, True, "autenticado_manual"
 
 
 async def autocompletar_datos_personales_y_cv(page) -> int:
@@ -2358,25 +2589,26 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if any(w in body_tras_clic for w in FRASES_CERRADA):
         return "cerrada", "Oferta cerrada o expirada en el portal (detectado tras clic inicial)"
 
-    # Comprobar si el portal externo presenta CAPTCHA antibot (Cloudflare Turnstile / reCAPTCHA / hCaptcha) o muro de sesión/registro
+    # Comprobar si el portal externo presenta CAPTCHA antibot (Cloudflare Turnstile / reCAPTCHA / hCaptcha)
     await asyncio.sleep(0.8)
     tiene_captcha_frame = any(
         any(k in (fr.url or "").lower() for k in ["turnstile", "recaptcha", "hcaptcha", "challenges.cloudflare"])
         for fr in page.frames
     )
     diag_bloqueo = await page.evaluate(r'''() => {
-        const hasPass = Array.from(document.querySelectorAll('input[type="password"]')).some(e => e.offsetParent !== null);
-        const editableNoLogin = Array.from(document.querySelectorAll('textarea, input[type="tel"], input[type="file"]')).some(e => e.offsetParent !== null && !e.readOnly && !e.disabled);
         const hasCaptchaFrame = Array.from(document.querySelectorAll('iframe')).some(f => /turnstile|recaptcha|hcaptcha|challenges\.cloudflare/i.test(f.src || ''));
-        return {hasPass, editableNoLogin, hasCaptchaFrame};
+        return {hasCaptchaFrame};
     }''')
     if tiene_captcha_frame or diag_bloqueo.get("hasCaptchaFrame") or any(w in body_tras_clic for w in ["verify you are human", "no soy un robot"]):
         print(f"🛡️ Portal externo bloqueado por verificación antibot/CAPTCHA ({page.url[:70]}). Respetando política sin automatizar CAPTCHA.")
         return "captcha_antibot", f"Portal externo requiere verificación humana / CAPTCHA manual: {page.url}"
-    if diag_bloqueo.get("hasPass") and not diag_bloqueo.get("editableNoLogin") and any(w in body_tras_clic for w in ["iniciar sesión", "inicio de sesión", "crear cuenta", "registrarse", "sign in", "create account", "ingresar a tu cuenta"]):
-        await autocompletar_datos_personales_y_cv(page)
-        print(f"🔑 Portal externo requiere inicio de sesión o registro manual ({page.url[:70]}). Correo completado con perfil personal; saltando espera.")
-        return "requiere_login", f"Portal externo exige inicio de sesión manual: {page.url}"
+
+    # Intentar flujo automático de autenticación (Google OAuth correof1553 -> Probar otro método x2 -> Bitwarden -> Pausa interactiva)
+    page, auth_ok, auth_mot = await manejar_autenticacion_portal(page, empresa, solo_auto=False)
+    if page not in tabs_oferta:
+        tabs_oferta.append(page)
+    if not auth_ok and auth_mot == "stop":
+        return "stop", "Bot detenido por el usuario durante inicio de sesión"
 
     # Verificar parada o pausa tras clic inicial
     st = await comprobar_pausa_y_parada(page)
