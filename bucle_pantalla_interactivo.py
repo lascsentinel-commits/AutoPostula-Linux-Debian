@@ -739,16 +739,320 @@ async def pulsar_segundo_postular(page) -> bool:
     return await page.evaluate('''() => {
         const btns = Array.from(document.querySelectorAll('button, a.btn, input[type=\"submit\"]')).filter(b => {
             const t = (b.innerText || b.value || "").trim().toLowerCase();
-            return (t === 'postular' || t.includes('enviar solicitud') || t.includes('postular') || t.includes('enviar') || t.includes('responder')) && b.offsetParent !== null;
+            return (t === 'postular' || t.includes('enviar solicitud') || t.includes('enviar postulación') || t === 'enviar' || t.includes('postular') || t.includes('finalizar') || t.includes('submit') || t.includes('responder')) && b.offsetParent !== null;
         });
         if (btns.length > 0) {
             btns[0].removeAttribute('disabled');
+            btns[0].removeAttribute('aria-disabled');
             btns[0].classList.remove('boton-deshabilitado');
             btns[0].click();
             return true;
         }
         return false;
     }''')
+
+
+def _cargar_perfil_usuario() -> dict:
+    """Carga los datos personales reales del perfil desde SQLite con respaldo seguro."""
+    perfil = {
+        "nombre_completo": "Dhani Amit Elgueta Ríos",
+        "primer_nombre": "Dhani Amit",
+        "primer_apellido": "Elgueta",
+        "segundo_apellido": "Ríos",
+        "apellidos": "Elgueta Ríos",
+        "email": "dh.elgueta@duocuc.cl",
+        "telefono": "+56 9 4850 8528",
+        "rut": "20.338.608-7",
+        "direccion": "Las Condes, Santiago",
+        "ciudad": "Santiago",
+        "comuna": "Las Condes",
+        "region": "Región Metropolitana",
+        "pais": "Chile",
+        "codigo_postal": "7550000",
+        "institucion": "Duoc UC",
+        "carrera": "Ingeniería en Infraestructura y Plataformas Tecnológicas",
+        "linkedin": "https://www.linkedin.com/in/dhani-amit-elgueta-rios-613470292/",
+        "ruta_cv": CV_MASTER_PDF,
+    }
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM perfil LIMIT 1").fetchone()
+        conn.close()
+        if row:
+            r = dict(row)
+            nombre = (r.get("nombre") or perfil["nombre_completo"]).strip()
+            partes = nombre.split()
+            perfil["nombre_completo"] = nombre
+            if len(partes) >= 4:
+                perfil["primer_nombre"] = " ".join(partes[:-2])
+                perfil["primer_apellido"] = partes[-2]
+                perfil["segundo_apellido"] = partes[-1]
+                perfil["apellidos"] = " ".join(partes[-2:])
+            elif len(partes) >= 2:
+                perfil["primer_nombre"] = partes[0]
+                perfil["apellidos"] = " ".join(partes[1:])
+                perfil["primer_apellido"] = partes[1]
+            for k_db, k_dst in [("email", "email"), ("telefono", "telefono"), ("rut", "rut"), ("comuna", "comuna"), ("region", "region"), ("institucion", "institucion"), ("carrera", "carrera"), ("ruta_cv_pdf", "ruta_cv")]:
+                if r.get(k_db):
+                    perfil[k_dst] = str(r[k_db]).strip()
+            if perfil["comuna"]:
+                perfil["direccion"] = f"{perfil['comuna']}, {perfil['ciudad']}"
+    except Exception:
+        pass
+    return perfil
+
+
+async def manejar_redireccion_externa(page):
+    """Detecta avisos ('Entendido' / 'Ya has ingresado...') y botones CTA externos ('Solicitar ahora') siguiendo nuevas pestañas."""
+    for ronda in range(2):
+        tabs_antes = list(page.context.pages)
+        clic_redir = False
+
+        # 1. Buscar SweetAlert2 / modal de redirección con botón 'Entendido' o 'Continuar'
+        try:
+            body_low = (await page.inner_text("body") or "").lower()
+            es_aviso_redir = any(w in body_low for w in [
+                "te redireccionaremos", "has ingresado a esta postulación", "completar el formulario de inscripción",
+                "sitio externo", "sitio web de la empresa", "página externa"
+            ])
+            selectores_redir = [
+                ".swal2-popup button.swal2-confirm",
+                ".swal2-confirm:has-text('Entendido')",
+                "button:has-text('Entendido')",
+                "a:has-text('Ir al formulario')",
+                "a:has-text('Continuar en sitio externo')",
+            ]
+            for sel in selectores_redir:
+                if sel == "button:has-text('Entendido')" and not es_aviso_redir:
+                    continue
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    txt_b = (await loc.inner_text() or "").strip()
+                    print(f"🔀 Detectado aviso de redirección externa. Pulsando '{txt_b}'...")
+                    await loc.click(timeout=4000)
+                    clic_redir = True
+                    await asyncio.sleep(3.0)
+                    break
+        except Exception:
+            pass
+
+        # Si abrió una nueva pestaña tras pulsar Entendido/Continuar, cambiar el foco del bot hacia ella
+        tabs_despues = list(page.context.pages)
+        if len(tabs_despues) > len(tabs_antes):
+            nueva_tab = [t for t in tabs_despues if t not in tabs_antes][-1]
+            print(f"🌐 Cambiando a nueva pestaña externa: {nueva_tab.url}")
+            try:
+                await nueva_tab.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            page = nueva_tab
+            await page.bring_to_front()
+            await asyncio.sleep(2.0)
+            await inyectar_boton_flotante_control(page)
+
+        # 2. En portales ATS externos (CSOD, Workday, AIRA, Buk, Greenhouse), pulsar 'Solicitar ahora' / 'Postular ahora' / 'Apply now'
+        es_portal_principal = any(dom in page.url.lower() for dom in ["firstjob.me", "trabajando.cl", "laborum.cl", "duoclaboral.cl", "computrabajo", "chiletrabajos"])
+        if not es_portal_principal or ronda == 1:
+            selectores_cta_ext = [
+                "button:has-text('Solicitar ahora')",
+                "a:has-text('Solicitar ahora')",
+                "button:has-text('Postular ahora')",
+                "a:has-text('Postular ahora')",
+                "button:has-text('Apply now')",
+                "a:has-text('Apply now')",
+                "button:has-text('Iniciar postulación')",
+                "button:has-text('Comenzar postulación')",
+            ]
+            tabs_cta_antes = list(page.context.pages)
+            for sel in selectores_cta_ext:
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        # Evitar repetir clic si ya estamos dentro de un formulario activo (/application o con inputs)
+                        ya_en_form = await page.locator("input[type='email']:visible, input[type='file'], input[name*='name']:visible").count() > 0
+                        if ya_en_form:
+                            break
+                        txt_cta = (await loc.inner_text() or "").strip()
+                        print(f"🚀 Portal externo detectado. Pulsando '{txt_cta}' para abrir formulario...")
+                        await loc.scroll_into_view_if_needed()
+                        await loc.click(timeout=5000)
+                        clic_redir = True
+                        await asyncio.sleep(3.5)
+                        break
+                except Exception:
+                    pass
+
+            tabs_cta_despues = list(page.context.pages)
+            if len(tabs_cta_despues) > len(tabs_cta_antes):
+                nueva_tab = [t for t in tabs_cta_despues if t not in tabs_cta_antes][-1]
+                try:
+                    await nueva_tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                page = nueva_tab
+                await page.bring_to_front()
+                await asyncio.sleep(1.5)
+                await inyectar_boton_flotante_control(page)
+
+        if not clic_redir:
+            break
+
+    return page
+
+
+async def autocompletar_datos_personales_y_cv(page) -> int:
+    """Autocompleta campos de identidad, contacto, ubicación, educación y sube CV PDF en formularios externos o nativos."""
+    perfil = _cargar_perfil_usuario()
+    completados = 0
+
+    # 1. Subida automática de CV en cualquier <input type='file'> disponible
+    ruta_cv = perfil.get("ruta_cv") or CV_MASTER_PDF
+    if not os.path.exists(ruta_cv):
+        ruta_cv = CV_MASTER_PDF
+    if ruta_cv and os.path.exists(ruta_cv):
+        file_inputs = await page.locator("input[type='file']").all()
+        for f_el in file_inputs:
+            try:
+                f_info = await f_el.evaluate(r'''el => {
+                    if (el.dataset.autopostulaFilled === '1') return {skip: true};
+                    let txt = ((el.id || '') + ' ' + (el.name || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
+                    let p = el.parentElement;
+                    for (let k = 0; k < 4 && p; k++) {
+                        txt += ' ' + (p.innerText || '').toLowerCase().slice(0, 200);
+                        p = p.parentElement;
+                    }
+                    return {skip: false, txt: txt, filesCount: el.files ? el.files.length : 0};
+                }''')
+                if f_info.get("skip") or f_info.get("filesCount", 0) > 0:
+                    continue
+                t_file = f_info.get("txt", "")
+                if any(k in t_file for k in ["cv", "curríc", "curric", "resume", "hoja de vida", "archivo", "upload", "adjuntar", "pdf"]) or len(file_inputs) == 1:
+                    await f_el.set_input_files(ruta_cv)
+                    await f_el.evaluate("el => { el.dataset.autopostulaFilled = '1'; el.dispatchEvent(new Event('change', {bubbles:true})); }")
+                    print(f"📄 CV PDF adjuntado automáticamente en formulario externo: {os.path.basename(ruta_cv)}")
+                    completados += 1
+                    await asyncio.sleep(2.5)
+            except Exception as e:
+                print(f"Aviso adjuntando CV en input file: {e}")
+
+    # 2. Autocompletado de campos de texto/email/tel personal si están vacíos
+    inputs = await page.locator("input[type='text']:visible, input[type='email']:visible, input[type='tel']:visible, input[type='url']:visible, input:not([type]):visible").all()
+    reglas_texto = [
+        (["nombre completo", "full name", "nombre y apellido"], perfil["nombre_completo"]),
+        (["primer apellido", "apellido paterno", "last name", "surname", "apellidos", "apellido"], perfil["apellidos"]),
+        (["segundo nombre", "middle name"], ""),
+        (["primer nombre", "first name", "nombre", "nombres", "given name"], perfil["primer_nombre"]),
+        (["correo", "email", "e-mail", "mail"], perfil["email"]),
+        (["teléfono", "telefono", "celular", "móvil", "movil", "phone", "mobile", "whatsapp"], perfil["telefono"]),
+        (["rut", "run", "dni", "cédula", "cedula", "identificación", "documento"], perfil["rut"]),
+        (["línea de dirección 2", "address line 2", "depto", "departamento"], ""),
+        (["línea de dirección", "dirección", "direccion", "address", "domicilio", "calle"], perfil["direccion"]),
+        (["comuna", "district"], perfil["comuna"]),
+        (["ciudad", "city", "localidad"], perfil["ciudad"]),
+        (["región", "region", "estado", "provincia", "state"], perfil["region"]),
+        (["código postal", "codigo postal", "postal", "zip"], perfil["codigo_postal"]),
+        (["universidad", "institución", "institucion", "casa de estudios", "school"], perfil["institucion"]),
+        (["carrera", "título", "titulo", "degree", "major"], perfil["carrera"]),
+        (["linkedin"], perfil["linkedin"]),
+    ]
+
+    for inp in inputs:
+        try:
+            meta = await inp.evaluate(r'''el => {
+                if (el.dataset.autopostulaFilled === '1' || el.disabled || el.readOnly) return {skip: true};
+                if (el.closest('header') || el.closest('nav') || el.closest('.search-box') || el.closest('#search')) return {skip: true};
+                const val = (el.value || '').trim();
+                if (val.length > 0) return {skip: true};
+                let label = '';
+                if (el.id) {
+                    const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                    if (l) label = l.innerText.trim();
+                }
+                const lby = el.getAttribute('aria-labelledby');
+                if (!label && lby) label = (document.getElementById(lby)?.innerText || '').trim();
+                if (!label) label = (el.getAttribute('aria-label') || el.placeholder || '').trim();
+                if (!label) {
+                    let p = el.parentElement;
+                    for (let k = 0; k < 4 && p; k++) {
+                        const candidates = Array.from(p.querySelectorAll('label, legend, span, div, p')).map(x => (x.innerText||'').trim()).filter(t => t && t.length > 1 && t.length < 70 && t.indexOf('\n') === -1 && t !== '*');
+                        if (candidates.length > 0) {
+                            label = candidates[0];
+                            break;
+                        }
+                        p = p.parentElement;
+                    }
+                }
+                return {skip: false, label: label, type: (el.type||'').toLowerCase(), id: el.id||'', name: el.name||''};
+            }''')
+            if meta.get("skip"):
+                continue
+
+            etiqueta = f"{meta.get('label', '')} {meta.get('name', '')} {meta.get('id', '')}".lower().replace("*", "").strip()
+            if any(blk in etiqueta for blk in ["search", "buscar", "filtro", "keywords"]):
+                continue
+
+            valor = None
+            if meta.get("type") == "email":
+                valor = perfil["email"]
+            elif meta.get("type") == "tel":
+                valor = perfil["telefono"]
+            else:
+                for claves, val_regla in reglas_texto:
+                    if any(c in etiqueta for c in claves):
+                        valor = val_regla
+                        break
+
+            if valor:
+                await inp.fill(valor)
+                await inp.evaluate("el => { el.dataset.autopostulaFilled = '1'; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); el.dispatchEvent(new Event('blur', {bubbles:true})); }")
+                completados += 1
+        except Exception:
+            pass
+
+    # 3. Autocompletado de <select> comunes de país/región/comuna si están sin seleccionar
+    try:
+        sel_count = await page.evaluate('''(perfil) => {
+            let cnt = 0;
+            const selects = Array.from(document.querySelectorAll('select')).filter(s => s.offsetParent !== null && !s.disabled);
+            for (const s of selects) {
+                const selOpt = s.options[s.selectedIndex];
+                const curTxt = (selOpt ? selOpt.text : '').trim().toLowerCase();
+                const isPlaceholder = !s.value || curTxt.includes('seleccione') || curTxt.includes('select') || curTxt === '--';
+                if (!isPlaceholder) continue;
+
+                let lbl = ((s.id || '') + ' ' + (s.name || '') + ' ' + (s.getAttribute('aria-label') || '')).toLowerCase();
+                let p = s.parentElement;
+                for (let k = 0; k < 4 && p; k++) {
+                    const l = p.querySelector('label, legend');
+                    if (l) { lbl += ' ' + l.innerText.toLowerCase(); break; }
+                    p = p.parentElement;
+                }
+
+                let desired = null;
+                if (lbl.includes('país') || lbl.includes('pais') || lbl.includes('country')) desired = 'chile';
+                else if (lbl.includes('región') || lbl.includes('region') || lbl.includes('estado') || lbl.includes('state')) desired = 'metropolitana';
+                else if (lbl.includes('comuna') || lbl.includes('ciudad') || lbl.includes('city')) desired = 'las condes';
+
+                if (desired) {
+                    const opt = Array.from(s.options).find(o => o.text.toLowerCase().includes(desired) || (desired === 'las condes' && o.text.toLowerCase().includes('santiago')));
+                    if (opt) {
+                        s.value = opt.value;
+                        s.dispatchEvent(new Event('change', {bubbles: true}));
+                        s.dispatchEvent(new Event('input', {bubbles: true}));
+                        cnt++;
+                    }
+                }
+            }
+            return cnt;
+        }''', perfil)
+        completados += sel_count or 0
+    except Exception:
+        pass
+
+    if completados > 0:
+        print(f"🪪 Autocompletados {completados} campos de identidad, contacto, ubicación y/o CV PDF.")
+    return completados
 
 
 async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[dict]:
@@ -772,7 +1076,8 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
             if not await el.is_visible():
                 continue
             es_valido = await el.evaluate(r'''el => {
-                if (el.type === 'search' || el.type === 'hidden' || el.type === 'submit' || el.type === 'radio' || el.type === 'checkbox') return false;
+                if (el.dataset.autopostulaFilled === '1') return false;
+                if (el.type === 'search' || el.type === 'hidden' || el.type === 'submit' || el.type === 'radio' || el.type === 'checkbox' || el.type === 'file' || el.type === 'email' || el.type === 'tel') return false;
                 if (el.closest('header') || el.closest('nav') || el.closest('#navbar') || el.closest('.search-box') || el.closest('#search') || el.closest('.filters') || el.closest('.sidebar') || el.closest('.banner')) return false;
                 
                 // En LinkedIn Easy Apply, si el input ya viene prellenado con teléfono/ciudad/nombre y no es una pregunta, respetarlo
@@ -849,10 +1154,25 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
                     }
                 }
 
-                // Fallback SDUI LinkedIn: subir hasta 4 ancestros buscando el enunciado de la pregunta
+                // Prioridad: atributos ARIA / label[for] estándar de portales ATS (CSOD, Workday, Greenhouse)
+                const lbyId = el.getAttribute('aria-labelledby');
+                if (lbyId) {
+                    const lbyEl = document.getElementById(lbyId);
+                    if (lbyEl && lbyEl.innerText.trim().length > 3) txt = lbyEl.innerText.trim();
+                }
+                if (!txt && el.id) {
+                    const fLbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                    if (fLbl && fLbl.innerText.trim().length > 3) txt = fLbl.innerText.trim();
+                }
+                if (!txt) {
+                    const aLbl = (el.getAttribute('aria-label') || '').trim();
+                    if (aLbl.length > 3 && !aLbl.toLowerCase().includes('buscar')) txt = aLbl;
+                }
+
+                // Fallback SDUI LinkedIn / ATS: subir hasta 6 ancestros buscando el enunciado de la pregunta
                 if (!txt) {
                     let cur = el.parentElement;
-                    for (let depth = 0; depth < 4 && cur; depth++) {
+                    for (let depth = 0; depth < 6 && cur; depth++) {
                         const lines = (cur.innerText || "").split(/\r?\n/).map(s => s.trim()).filter(s => {
                             const sl = s.toLowerCase();
                             return s.length > 5 && !sl.includes('caracteres') && !/^\d+\/\d+$/.test(sl) && sl !== 'yes' && sl !== 'no';
@@ -981,8 +1301,8 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
         except Exception as e:
             print(f"Aviso al llenar campo {idx}: {e}")
 
-    # Marcar TODOS los grupos de radios y selects (soporta Español Sí/No y LinkedIn Inglés Yes/No)
-    await page.evaluate('''() => {
+    # Marcar TODOS los grupos de radios y selects con coincidencia semántica de perfil y sí/no
+    await page.evaluate(r'''() => {
         const radioNames = new Set();
         document.querySelectorAll('input[type="radio"]').forEach(r => {
             if (r.name) radioNames.add(r.name);
@@ -990,45 +1310,68 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
 
         for (let name of radioNames) {
             const inputs = Array.from(document.querySelectorAll(`input[name="${name}"]`));
-            let answered = inputs.some(inp => inp.checked);
-            if (answered) continue;
+            if (inputs.length === 0) continue;
+            if (inputs.some(inp => inp.checked)) continue;
 
-            const container = inputs[0].closest('.form-group') || inputs[0].closest('div[class*="question"]') || inputs[0].closest('fieldset') || (inputs[0].parentElement && inputs[0].parentElement.parentElement && inputs[0].parentElement.parentElement.parentElement) || inputs[0].parentElement;
-            const containerText = container ? container.innerText.toLowerCase() : "";
-            const isNoExpected = containerText.includes("inclusión") || containerText.includes("ajuste razonable") || containerText.includes("discapacidad");
+            // Extraer texto contextual completo de la pregunta (hasta 4 niveles arriba)
+            let container = inputs[0].closest('.form-group') || inputs[0].closest('div[class*="question"]') || inputs[0].closest('fieldset') || inputs[0].closest('[role="radiogroup"]');
+            let qtxt = container ? container.innerText.toLowerCase() : "";
+            let cur = container || inputs[0].parentElement;
+            for (let k = 0; k < 4 && cur; k++) {
+                const t = (cur.innerText || "").toLowerCase();
+                if (t.includes('?') || t.includes('carrera') || t.includes('estudio') || t.includes('inglés') || t.includes('ingles') || t.includes('ley 21.015') || t.includes('vacaciones')) {
+                    qtxt = t.slice(0, 500);
+                    break;
+                }
+                cur = cur.parentElement;
+            }
 
-            let targetInput = null;
-            let targetLabel = null;
-
-            for (let inp of inputs) {
+            const getOptText = (inp) => {
                 const lbl = inp.closest('label') || (inp.id ? document.querySelector(`label[for="${CSS.escape(inp.id)}"]`) : null) || inp.parentElement;
-                const txt = lbl ? lbl.innerText.trim().toUpperCase() : (inp.value || "").toUpperCase();
-                if (isNoExpected) {
-                    if (txt === "NO" || txt.startsWith("NO")) {
-                        targetInput = inp;
-                        targetLabel = lbl;
-                        break;
-                    }
-                } else {
-                    if (txt === "SI" || txt === "SÍ" || txt === "YES" || txt.startsWith("SI ") || txt.startsWith("SÍ ") || txt.startsWith("YES ") || txt.includes("SÍ") || txt.includes("YES")) {
-                        targetInput = inp;
-                        targetLabel = lbl;
-                        break;
+                return { lbl, txt: (lbl ? lbl.innerText : (inp.value || "")).trim() };
+            };
+
+            const opts = inputs.map(inp => ({ inp, ...getOptText(inp) }));
+            let chosen = null;
+
+            const isNoExpected = qtxt.includes("inclusi") || qtxt.includes("ley 21.015") || qtxt.includes("ajuste razonable") || qtxt.includes("discapacidad") || qtxt.includes("vacaciones programadas");
+
+            if (qtxt.includes("carrera") || qtxt.includes("título") || qtxt.includes("profesión")) {
+                const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+                const prefs = ["infraestructura", "ingenieria en inform", "informatica", "computacion", "otras"];
+                for (const p of prefs) {
+                    chosen = opts.find(o => norm(o.txt).includes(p));
+                    if (chosen) break;
+                }
+            } else if (qtxt.includes("casa de estudio") || qtxt.includes("universidad") || qtxt.includes("institución") || qtxt.includes("institucion")) {
+                chosen = opts.find(o => o.txt.toLowerCase().includes("duoc"));
+            } else if (qtxt.includes("inglés") || qtxt.includes("ingles")) {
+                chosen = opts.find(o => o.txt.toLowerCase().includes("intermedio"));
+            }
+
+            if (!chosen) {
+                for (const o of opts) {
+                    const u = o.txt.toUpperCase();
+                    if (isNoExpected) {
+                        if (u === "NO" || u.startsWith("NO ")) { chosen = o; break; }
+                    } else {
+                        if (u === "SI" || u === "SÍ" || u === "YES" || u.startsWith("SI ") || u.startsWith("SÍ ") || u.startsWith("YES ")) {
+                            chosen = o; break;
+                        }
                     }
                 }
             }
 
-            if (!targetInput && !isNoExpected && inputs.length > 0) {
-                targetInput = inputs[0];
-                targetLabel = targetInput.closest('label') || (targetInput.id ? document.querySelector(`label[for="${CSS.escape(targetInput.id)}"]`) : null) || targetInput.parentElement;
+            if (!chosen && !isNoExpected && opts.length <= 3) {
+                chosen = opts[0];
             }
 
-            if (targetInput) {
-                targetInput.checked = true;
-                if (targetLabel) targetLabel.click();
-                targetInput.click();
-                targetInput.dispatchEvent(new Event('change', { bubbles: true }));
-                targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+            if (chosen) {
+                chosen.inp.checked = true;
+                if (chosen.lbl) chosen.lbl.click();
+                chosen.inp.click();
+                chosen.inp.dispatchEvent(new Event('change', { bubbles: true }));
+                chosen.inp.dispatchEvent(new Event('input', { bubbles: true }));
             }
         }
 
@@ -1048,7 +1391,7 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
             }
         }
 
-        const selects = Array.from(document.querySelectorAll('form select, .input-style select, dialog[open] select, select:not([name*="search"])'));
+        const selects = Array.from(document.querySelectorAll('form select, .input-style select, dialog[open] select, select:not([name*="search"]):not([name="idioma"])'));
         for (let sel of selects) {
             if (!sel.offsetParent) continue;
             if (sel.value && sel.value !== "" && !sel.value.toLowerCase().includes("select")) continue;
@@ -1098,43 +1441,67 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
 
 
 async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> list[dict]:
-    """Si hay un modal multipaso de LinkedIn Easy Apply (<dialog open>), completa cada paso ('Siguiente'/'Revisar') hasta llegar a 'Enviar solicitud'."""
+    """Completa formularios de 1 o múltiples pasos en LinkedIn Easy Apply (<dialog open>) y portales ATS externos (CSOD, AIRA, Buk, Workday, etc.), rellenando datos personales, CV PDF y preguntas."""
     qa_acumulada = []
     try:
         tiene_dlg = await page.locator("dialog[open], div.jobs-easy-apply-modal").count() > 0
     except Exception:
         tiene_dlg = False
 
-    if not tiene_dlg:
+    url_low = page.url.lower()
+    es_portal_nativo = any(dom in url_low for dom in ["firstjob.me", "trabajando.cl", "laborum.cl", "duoclaboral.cl", "computrabajo", "chiletrabajos", "serviciocivil.cl"])
+
+    if not tiene_dlg and es_portal_nativo:
+        await autocompletar_datos_personales_y_cv(page)
         return await rellenar_formulario_actual(page, empresa, titulo)
 
-    print("🔗 Detectado asistente multipaso de Solicitud Sencilla de LinkedIn...")
+    modo = "LinkedIn Easy Apply" if tiene_dlg else "ATS / Formulario Externo"
+    print(f"🔗 Detectado asistente multipaso ({modo})...")
+
     for paso in range(1, 8):
+        await autocompletar_datos_personales_y_cv(page)
         qa_step = await rellenar_formulario_actual(page, empresa, titulo)
         qa_acumulada.extend(qa_step)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.6)
 
-        # ¿Ya estamos en el paso final ('Enviar solicitud' / 'Submit application')?
-        btn_enviar = page.locator("dialog[open] button:has-text('Enviar solicitud'), dialog[open] button:has-text('Submit application'), .jobs-easy-apply-modal button:has-text('Enviar solicitud')").first
+        if tiene_dlg:
+            sel_enviar = "dialog[open] button:has-text('Enviar solicitud'), dialog[open] button:has-text('Submit application'), .jobs-easy-apply-modal button:has-text('Enviar solicitud')"
+            sel_avanzar = "dialog[open] button:has-text('Revisar'), dialog[open] button:has-text('Siguiente'), dialog[open] button:has-text('Next'), dialog[open] button:has-text('Review'), .jobs-easy-apply-modal button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Revisar')"
+        else:
+            sel_enviar = "button:has-text('Enviar solicitud'), button:has-text('Enviar postulación'), button:has-text('Finalizar postulación'), button:has-text('Submit application'), button:text-is('Enviar'), input[type='submit'][value*='Enviar']"
+            sel_avanzar = "button:has-text('Siguiente'), button:has-text('Guardar y continuar'), button:has-text('Continuar'), button:has-text('Next'), button:has-text('Continue'), button:has-text('Revisar')"
+
+        # ¿Ya estamos en el paso final?
         try:
+            btn_enviar = page.locator(sel_enviar).first
             if await btn_enviar.count() > 0 and await btn_enviar.is_visible():
-                print(f"✅ Asistente de LinkedIn llegó al paso final ('Enviar solicitud') en paso {paso}.")
+                print(f"✅ Asistente ({modo}) llegó al paso final de envío en paso {paso}.")
                 break
         except Exception:
             pass
 
-        # Si hay 'Siguiente' o 'Revisar', avanzarlo
-        btn_avanzar = page.locator("dialog[open] button:has-text('Revisar'), dialog[open] button:has-text('Siguiente'), dialog[open] button:has-text('Next'), dialog[open] button:has-text('Review'), .jobs-easy-apply-modal button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Revisar')").first
+        # Si hay botón de siguiente paso y aún no es el envío final, avanzarlo
         try:
+            btn_avanzar = page.locator(sel_avanzar).first
             if await btn_avanzar.count() > 0 and await btn_avanzar.is_visible():
+                en_nav = await btn_avanzar.evaluate("el => !!(el.closest('header') || el.closest('nav') || el.closest('#autopostula-root-container'))")
+                if en_nav:
+                    break
                 lbl_btn = (await btn_avanzar.inner_text() or "").strip()
-                print(f"➡️  Paso {paso} de LinkedIn completado. Pulsando '{lbl_btn}'...")
-                await btn_avanzar.click(timeout=4000)
-                await asyncio.sleep(1.5)
+                print(f"➡️  Paso {paso} ({modo}) completado. Pulsando '{lbl_btn}'...")
+                url_antes = page.url
+                await btn_avanzar.scroll_into_view_if_needed()
+                await btn_avanzar.click(timeout=5000)
+                await asyncio.sleep(2.0)
+                # Si la validación del formulario bloqueó el avance porque falta algo manual, detener avance y dejarlo para revisión
+                misma_url_sin_cambio = (page.url == url_antes)
+                if misma_url_sin_cambio and await page.locator("text=/obligatorio|requerido|required|completar este campo/i").count() > 0:
+                    print(f"⚠️  Formulario ({modo}) detuvo el avance por un campo obligatorio pendiente; pasando a revisión en pantalla.")
+                    break
             else:
                 break
         except Exception as e:
-            print(f"Aviso avanzando paso {paso} de LinkedIn: {e}")
+            print(f"Aviso avanzando paso {paso} ({modo}): {e}")
             break
 
     return qa_acumulada
@@ -1205,6 +1572,9 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         await page.bring_to_front()
         await asyncio.sleep(1.5)
         await inyectar_boton_flotante_control(page)
+
+    # Detectar avisos ('Entendido' / 'Te redireccionaremos') o CTA externos ('Solicitar ahora')
+    page = await manejar_redireccion_externa(page)
 
     # Comprobar si tras el clic inicial redirigió a un catálogo
     if es_url_catalogo(page.url, portal):
@@ -1350,6 +1720,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     while tiempo_transcurrido < segundos_revision:
         try:
             estado_control = await page.evaluate('''() => {
+                const bt = (document.body ? document.body.innerText : '').toLowerCase();
+                const explSuccess = bt.includes('postulación enviada') || bt.includes('solicitud enviada') || bt.includes('gracias por postular') || bt.includes('postulación completada') || bt.includes('has postulado con éxito') || bt.includes('application submitted');
                 return {
                     stop: window.__autopostula_stop || false,
                     paused: window.__autopostula_paused || false,
@@ -1357,10 +1729,13 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
                     customSeconds: window.__autopostula_segundos_revision || null,
                     clickedManual: window.__usuario_envio_postulacion || false,
                     qaMap: window.__autopostula_qa_map || {},
-                    success: document.body.innerText.toLowerCase().includes('éxito') || document.body.innerText.toLowerCase().includes('postulado')
+                    success: explSuccess
                 };
             }''')
         except Exception:
+            if esta_pausado_prev:
+                await asyncio.sleep(0.5)
+                continue
             # Si la página ya navegó tras clic manual
             clic_manual = True
             break
@@ -1373,6 +1748,21 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             _sincronizar_ediciones_en_memoria(ultimo_qa_map, forzar=True)
             print(f"\n🛑 ¡Detectado clic en la X roja! Detención total solicitada por el usuario.")
             return "stop", "Bot detenido por el usuario con la X roja"
+
+        if estado_control.get("paused"):
+            if not esta_pausado_prev:
+                print(f"\n⏸️  BOT PAUSADO por el usuario desde el botón flotante.")
+                hablar("Bot pausado. Tómate el tiempo necesario para revisar o editar.")
+                esta_pausado_prev = True
+                await page.evaluate('''() => {
+                    window.__autopostula_timer_text = 'PAUSA';
+                    const pt = document.getElementById('autopostula-pill-timer');
+                    if (pt) { pt.innerText = 'PAUSA'; pt.style.background = '#d97706'; }
+                    const mt = document.getElementById('autopostula-modal-timer');
+                    if (mt) { mt.innerText = 'PAUSA'; mt.style.background = '#d97706'; }
+                }''')
+            await asyncio.sleep(0.5)
+            continue
 
         if estado_control.get("clickedManual") or estado_control.get("success"):
             clic_manual = True
@@ -1390,21 +1780,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             segundos_revision = nuevo_seg
             print(f"\n⚙️  Tiempo de revisión actualizado dinámicamente a {segundos_revision}s.")
 
-        if estado_control.get("paused"):
-            if not esta_pausado_prev:
-                print(f"\n⏸️  BOT PAUSADO por el usuario desde el botón flotante.")
-                hablar("Bot pausado. Tómate el tiempo necesario para revisar o editar.")
-                esta_pausado_prev = True
-                await page.evaluate('''() => {
-                    window.__autopostula_timer_text = 'PAUSA';
-                    const pt = document.getElementById('autopostula-pill-timer');
-                    if (pt) { pt.innerText = 'PAUSA'; pt.style.background = '#d97706'; }
-                    const mt = document.getElementById('autopostula-modal-timer');
-                    if (mt) { mt.innerText = 'PAUSA'; mt.style.background = '#d97706'; }
-                }''')
-            await asyncio.sleep(0.5)
-            continue
-        else:
+        if True:
             if esta_pausado_prev:
                 print(f"\n▶️  BOT REANUDADO por el usuario.")
                 hablar("Bot reanudado.")
