@@ -320,6 +320,31 @@ FRASES_CERRADA = [
     "lo sentimos, esta oferta", "esta oferta ya no", "no disponible actualmente"
 ]
 
+FRASES_YA_POSTULADO = [
+    "ya ha realizado una solicitud", "ya has realizado una solicitud",
+    "you have already applied", "ya te has postulado", "ya has postulado",
+    "ya estás postulado", "ya te postulaste", "ya postulaste",
+    "postulación enviada", "solicitud enviada", "candidatura enviada",
+    "postulación recibida", "ver tu postulación", "you already applied",
+]
+
+FRASES_CONFIRMACION_ENVIO = [
+    "postulación exitosa", "postulacion exitosa", "solicitud completada",
+    "postulación completada", "postulacion completada", "postulación enviada",
+    "postulacion enviada", "solicitud enviada", "envió tu solicitud",
+    "tu solicitud se envió", "ha presentado solicitud exitosamente",
+    "presentado solicitud exitosamente", "ha presentado una solicitud",
+    "tu postulación fue recibida", "postulación recibida", "solicitud recibida",
+    "enviada correctamente", "gracias por postular", "gracias por su solicitud",
+    "gracias por tu solicitud", "hemos recibido su solicitud", "gracias por aplicar",
+    "has postulado con éxito", "ya te has postulado", "ya has postulado",
+    "ya estás postulado", "ya postulaste", "postular de nuevo",
+    "ya ha realizado una solicitud", "ya has realizado una solicitud",
+    "application was sent", "application submitted", "application received",
+    "thank you for applying", "thank you for your application",
+    "candidatura enviada",
+]
+
 
 GLOBAL_BOT_CONTROL = {
     "paused": False,
@@ -338,6 +363,7 @@ GLOBAL_BOT_CONTROL = {
 }
 
 BOT_OWNED_PAGES: set = set()
+TABS_PROTEGIDAS_MANUAL: set = set()
 
 
 async def _detectar_nueva_pestana_del_bot(tabs_antes: list, parent_page):
@@ -744,7 +770,8 @@ async def gestionar_limite_pestanas(browser, max_tabs: int | None = None, tabs_p
     if max_tabs is None:
         max_tabs = GLOBAL_BOT_CONTROL.get("max_tabs", 4)
     limite = max(0, int(max_tabs))
-    protegidas = tabs_protegidas or set()
+    TABS_PROTEGIDAS_MANUAL.difference_update({p for p in list(TABS_PROTEGIDAS_MANUAL) if p.is_closed()})
+    protegidas = set(tabs_protegidas or set()) | TABS_PROTEGIDAS_MANUAL
     keep_personal = [
         "mis-postulaciones", "campusvirtual.duoc.cl", "localhost:8087",
         "/postulantes/curriculum", "linkedin.com/in/", "github.com", "google.com/search"
@@ -765,7 +792,7 @@ async def gestionar_limite_pestanas(browser, max_tabs: int | None = None, tabs_p
                     const hasModalForm = document.querySelectorAll('dialog[open], #form-postulation-questions textarea, form#formularioPreguntasOferta textarea, .jobs-easy-apply-modal').length > 0;
                     const typed = Array.from(document.querySelectorAll('textarea, input[type="text"]:not([id*="search"]):not([id*="react-select"]):not([id*="select-footer"])')).filter(e => e.offsetParent !== null && (e.value || '').trim().length > 2).length;
                     const closed = bt.includes('ya no se aceptan solicitudes') || bt.includes('no longer accepting applications') || bt.includes('oferta cerrada') || bt.includes('ya no está disponible');
-                    const done = bt.includes('solicitud enviada') || bt.includes('postulación enviada') || bt.includes('ha presentado solicitud exitosamente') || bt.includes('postulación exitosa') || bt.includes('solicitud completada') || Array.from(document.querySelectorAll('button, a')).some(e => (e.innerText || '').includes('Ver estadísticas'));
+                    const done = bt.includes('solicitud enviada') || bt.includes('postulación enviada') || bt.includes('ha presentado solicitud exitosamente') || bt.includes('postulación exitosa') || bt.includes('solicitud completada') || bt.includes('gracias por su solicitud') || bt.includes('hemos recibido su solicitud') || bt.includes('ya ha realizado una solicitud') || Array.from(document.querySelectorAll('button, a')).some(e => (e.innerText || '').includes('Ver estadísticas'));
                     return { hasModalForm, typed, closed, done };
                 }''')
             except Exception:
@@ -2787,12 +2814,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
 
     # Comprobar si ya está postulado o cerrada
     body_text = (await page.inner_text("body") or "").lower()
-    if any(w in body_text for w in [
-        "ya te has postulado", "ya has postulado", "ya estás postulado",
-        "ya postulaste", "postulación enviada", "solicitud enviada",
-        "candidatura enviada", "postulación recibida", "ver tu postulación",
-        "you already applied"
-    ]):
+    if any(w in body_text for w in FRASES_YA_POSTULADO):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta"
 
     if any(w in body_text for w in FRASES_CERRADA):
@@ -2849,12 +2871,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if es_pagina_comercial_no_laboral(page.url, body_tras_clic):
         print(f"⚠️  Se detectó redirección comercial o no laboral ({page.url[:70]}). Cerrando sin postular.")
         return "cerrada", "Redirigió a página comercial / publicidad (no es oferta laboral)"
-    if any(w in body_tras_clic for w in [
-        "ya te postulaste", "ya te has postulado", "ya has postulado",
-        "ya estás postulado", "ya postulaste", "postulación enviada",
-        "solicitud enviada", "candidatura enviada", "postulación recibida",
-        "ver tu postulación", "you already applied"
-    ]):
+    if any(w in body_tras_clic for w in FRASES_YA_POSTULADO):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras clic inicial)"
 
     if any(w in body_tras_clic for w in FRASES_CERRADA):
@@ -2880,6 +2897,16 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         tabs_oferta.append(page)
     if not auth_ok and auth_mot == "stop":
         return "stop", "Bot detenido por el usuario durante inicio de sesión"
+
+    # Comprobar tras el inicio de sesión SSO si el portal (ej. Workday) ya registra una postulación previa o oferta cerrada
+    try:
+        body_post_auth = (await page.inner_text("body") or "").lower()
+        if any(w in body_post_auth for w in FRASES_YA_POSTULADO):
+            return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras login)"
+        if any(w in body_post_auth for w in FRASES_CERRADA):
+            return "cerrada", "Oferta cerrada o expirada tras iniciar sesión"
+    except Exception:
+        pass
 
     # Verificar parada o pausa tras clic inicial
     st = await comprobar_pausa_y_parada(page)
@@ -3020,15 +3047,15 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             await sincronizar_widgets_navegador(browser)
 
         try:
-            estado_control = await page.evaluate('''() => {
+            estado_control = await page.evaluate('''(frases) => {
                 const bt = (document.body ? document.body.innerText : '').toLowerCase();
-                const explSuccess = bt.includes('postulación enviada') || bt.includes('postulación exitosa') || bt.includes('solicitud completada') || bt.includes('solicitud enviada') || bt.includes('ha presentado solicitud exitosamente') || bt.includes('gracias por postular') || bt.includes('postulación completada') || bt.includes('has postulado con éxito') || bt.includes('application submitted');
+                const explSuccess = frases.some(w => bt.includes(w));
                 return {
                     clickedManual: window.__usuario_envio_postulacion || false,
                     qaMap: window.__autopostula_qa_map || {},
                     success: explSuccess
                 };
-            }''')
+            }''', FRASES_CONFIRMACION_ENVIO)
         except Exception:
             estado_control = {}
             if GLOBAL_BOT_CONTROL["paused"] or esta_pausado_prev:
@@ -3113,19 +3140,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         body_final = (await page.inner_text("body") or "").lower()
         url_final = page.url.lower()
 
-        palabras_exito = [
-            "postulación exitosa", "postulacion exitosa", "solicitud completada",
-            "postulación completada", "postulacion completada", "postulación enviada",
-            "postulacion enviada", "solicitud enviada", "envió tu solicitud",
-            "tu solicitud se envió", "ha presentado solicitud exitosamente",
-            "presentado solicitud exitosamente", "tu postulación fue recibida",
-            "postulación recibida", "enviada correctamente", "gracias por postular",
-            "has postulado con éxito", "ya te has postulado", "ya has postulado",
-            "ya estás postulado", "ya postulaste", "postular de nuevo",
-            "application was sent", "application submitted", "candidatura enviada",
-        ]
-
-        if any(w in body_final for w in palabras_exito) or ("mis-postulaciones" in url_final) or ("match" in url_final):
+        if any(w in body_final for w in FRASES_CONFIRMACION_ENVIO) or ("mis-postulaciones" in url_final) or ("match" in url_final):
             es_exito = True
             motivo_exito = "Texto explícito o URL de éxito detectada"
             break
@@ -3164,6 +3179,71 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     else:
         print(f"\n⚠️  Aviso: No se detectó confirmación explícita de postulación en {portal}. Se marcará para revisión.")
         return "revision", f"Revisar estado en {portal} (no se detectó confirmación explícita tras envío)"
+
+
+async def _tabs_tienen_confirmacion(tabs_oferta: list) -> bool:
+    """Comprueba si alguna pestaña activa de la oferta muestra confirmación explícita de envío."""
+    for pg in list(tabs_oferta):
+        try:
+            if pg.is_closed():
+                continue
+            bt = (await pg.inner_text("body") or "").lower()
+            if any(w in bt for w in FRASES_CONFIRMACION_ENVIO):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _esperar_post_envio_y_cerrar(browser, tabs_oferta: list, empresa: str, espera_post: int) -> bool:
+    """Espera `espera_post` segundos visibles (`OK Xs`) con soporte Pausa/Reanudar antes de cerrar la pestaña confirmada. Devuelve False si el usuario detuvo el bot."""
+    if espera_post > 5:
+        hablar(f"Postulación a {empresa} confirmada en pantalla. Esperando {espera_post} segundos para revisar; puedes pausar y al reanudar pasará a la siguiente.")
+    else:
+        hablar(f"Postulación a {empresa} confirmada con éxito visible en pantalla.")
+
+    post_elapsed = 0.0
+    post_pausado_prev = False
+    GLOBAL_BOT_CONTROL["skip_wait"] = False
+    while post_elapsed < espera_post:
+        await sincronizar_widgets_navegador(browser)
+        if GLOBAL_BOT_CONTROL["stop"]:
+            print("\n🛑 Bucle detenido por completo por el usuario en verificación post-envío.")
+            hablar("Bot detenido por completo a solicitud del usuario.", final=True)
+            await desactivar_widgets_navegador(browser)
+            return False
+        if GLOBAL_BOT_CONTROL["paused"]:
+            if not post_pausado_prev:
+                print("\n⏸️  PAUSADO tras confirmar postulación. Revisa en pantalla y pulsa Reanudar para cerrar y pasar a la siguiente.")
+                hablar("Pausado tras confirmar el envío. Presiona reanudar cuando quieras cerrar y seguir.")
+                post_pausado_prev = True
+                GLOBAL_BOT_CONTROL["timer_text"] = "PAUSA"
+                await sincronizar_widgets_navegador(browser)
+            await asyncio.sleep(0.5)
+            continue
+        if post_pausado_prev:
+            print("\n▶️  Reanudado tras revisión: cerrando pestaña confirmada y pasando a la siguiente...")
+            hablar("Cerrando y pasando a la siguiente oferta.")
+            break
+        if GLOBAL_BOT_CONTROL["skip_wait"]:
+            GLOBAL_BOT_CONTROL["skip_wait"] = False
+            print("\n🚀 Avance inmediato solicitado: cerrando pestaña confirmada...")
+            break
+        rest_post = max(0, int(espera_post - post_elapsed))
+        GLOBAL_BOT_CONTROL["timer_text"] = f"OK {rest_post}s"
+        await sincronizar_widgets_navegador(browser)
+        print(f"\r👁️  Verificación post-envío: {rest_post:02d}s | [⏸️ Pausar | ▶️ Reanudar = Siguiente]...", end="", flush=True)
+        await asyncio.sleep(0.5)
+        post_elapsed += 0.5
+    print("")
+    for pg_o in list(tabs_oferta):
+        TABS_PROTEGIDAS_MANUAL.discard(pg_o)
+        try:
+            if not pg_o.is_closed():
+                await pg_o.close()
+        except Exception:
+            pass
+    return True
 
 
 async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, solo_id: int = None, solo_portal: str | None = None):
@@ -3270,51 +3350,9 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                 )
                 conn.commit()
                 espera_post = max(0, int(GLOBAL_BOT_CONTROL.get("segundos", segundos_revision))) if res_tipo == "ok" else 4
-                if res_tipo == "ok" and espera_post > 5:
-                    hablar(f"Postulación a {empresa} confirmada en pantalla. Esperando {espera_post} segundos para revisar; puedes pausar y al reanudar pasará a la siguiente.")
-                else:
-                    hablar(f"Postulación a {empresa} confirmada con éxito visible en pantalla.")
-
-                post_elapsed = 0.0
-                post_pausado_prev = False
-                GLOBAL_BOT_CONTROL["skip_wait"] = False
-                while post_elapsed < espera_post:
-                    await sincronizar_widgets_navegador(browser)
-                    if GLOBAL_BOT_CONTROL["stop"]:
-                        print("\n🛑 Bucle detenido por completo por el usuario en verificación post-envío.")
-                        hablar("Bot detenido por completo a solicitud del usuario.", final=True)
-                        conn.close()
-                        await desactivar_widgets_navegador(browser)
-                        return
-                    if GLOBAL_BOT_CONTROL["paused"]:
-                        if not post_pausado_prev:
-                            print("\n⏸️  PAUSADO tras confirmar postulación. Revisa en pantalla y pulsa Reanudar para cerrar y pasar a la siguiente.")
-                            hablar("Pausado tras confirmar el envío. Presiona reanudar cuando quieras cerrar y seguir.")
-                            post_pausado_prev = True
-                            GLOBAL_BOT_CONTROL["timer_text"] = "PAUSA"
-                            await sincronizar_widgets_navegador(browser)
-                        await asyncio.sleep(0.5)
-                        continue
-                    if post_pausado_prev:
-                        print("\n▶️  Reanudado tras revisión: cerrando pestaña confirmada y pasando a la siguiente...")
-                        hablar("Cerrando y pasando a la siguiente oferta.")
-                        break
-                    if GLOBAL_BOT_CONTROL["skip_wait"]:
-                        GLOBAL_BOT_CONTROL["skip_wait"] = False
-                        print("\n🚀 Avance inmediato solicitado: cerrando pestaña confirmada...")
-                        break
-                    rest_post = max(0, int(espera_post - post_elapsed))
-                    GLOBAL_BOT_CONTROL["timer_text"] = f"OK {rest_post}s"
-                    await sincronizar_widgets_navegador(browser)
-                    print(f"\r👁️  Verificación post-envío: {rest_post:02d}s | [⏸️ Pausar | ▶️ Reanudar = Siguiente]...", end="", flush=True)
-                    await asyncio.sleep(0.5)
-                    post_elapsed += 0.5
-                print("")
-                for pg_o in tabs_oferta:
-                    try:
-                        await pg_o.close()
-                    except Exception:
-                        pass
+                if not await _esperar_post_envio_y_cerrar(browser, tabs_oferta, empresa, espera_post):
+                    conn.close()
+                    return
             elif res_tipo == "descartada_desc":
                 nuevo_estado = "⏭️ Descartada (Descripción no compatible)"
                 c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", (nuevo_estado, msg, of_id))
@@ -3348,14 +3386,21 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
             else:
                 c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Revisión en pantalla] {msg}", of_id))
                 conn.commit()
+                for pg_o in tabs_oferta:
+                    TABS_PROTEGIDAS_MANUAL.add(pg_o)
                 print(f"⚠️  Oferta #{of_id} NO completó o no confirmó envío automático. PAUSANDO Y MANTENIENDO PESTAÑA ABIERTA.")
                 GLOBAL_BOT_CONTROL["paused"] = True
                 GLOBAL_BOT_CONTROL["timer_text"] = "SIN ENVIAR"
                 traer_brave_al_frente()
                 await sincronizar_widgets_navegador(browser)
-                hablar(f"Atención: la postulación a {empresa} no se completó ni confirmó el envío. Queda pausada y abierta para revisarla. Cuando esté lista o quieras seguir, pulsa Reanudar Bot.")
+                hablar(f"Atención: la postulación a {empresa} no se completó ni confirmó el envío. Queda pausada y abierta para revisarla. Cuando la envíes, esperaré los 30 segundos antes de cerrarla.")
 
+                confirmado_manual = False
                 while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"]:
+                    if await _tabs_tienen_confirmacion(tabs_oferta):
+                        confirmado_manual = True
+                        GLOBAL_BOT_CONTROL["paused"] = False
+                        break
                     await sincronizar_widgets_navegador(browser)
                     await asyncio.sleep(0.5)
 
@@ -3364,25 +3409,27 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                     await desactivar_widgets_navegador(browser)
                     return
 
-                # Comprobar al reanudar si el usuario completó y confirmó el envío en pantalla
-                try:
-                    pg_act = tabs_oferta[-1] if tabs_oferta else None
-                    if pg_act and not pg_act.is_closed():
-                        bt_post_res = (await pg_act.inner_text("body") or "").lower()
-                        if any(w in bt_post_res for w in ["postulación exitosa", "solicitud completada", "postulación enviada", "solicitud enviada", "gracias por postular", "candidatura enviada"]):
-                            c.execute(
-                                "UPDATE postulaciones SET estado = ?, fecha_postulacion = ?, metodo_postulacion = 'brave_cdp_pantalla', notas = ? WHERE id = ?",
-                                ("🟢 Postulado Confirmado", now_str, "[Completado manualmente tras pausa]", of_id)
-                            )
-                            conn.commit()
-                            exitosas += 1
-                            for pg_o in tabs_oferta:
-                                try:
-                                    await pg_o.close()
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
+                # Si el usuario pulsó Reanudar justo tras pulsar Enviar, esperar brevemente confirmación AJAX antes de cerrar
+                if not confirmado_manual:
+                    for _ in range(7):
+                        if await _tabs_tienen_confirmacion(tabs_oferta):
+                            confirmado_manual = True
+                            break
+                        await asyncio.sleep(0.5)
+
+                if confirmado_manual:
+                    c.execute(
+                        "UPDATE postulaciones SET estado = ?, fecha_postulacion = ?, metodo_postulacion = 'brave_cdp_pantalla', notas = ? WHERE id = ?",
+                        ("🟢 Postulado Confirmado", now_str, "[Completado manualmente tras pausa]", of_id)
+                    )
+                    conn.commit()
+                    exitosas += 1
+                    espera_post = max(5, int(GLOBAL_BOT_CONTROL.get("segundos", segundos_revision)))
+                    if not await _esperar_post_envio_y_cerrar(browser, tabs_oferta, empresa, espera_post):
+                        conn.close()
+                        return
+                else:
+                    print(f"🔒 Pestaña de #{of_id} sin confirmación de envío: se mantiene abierta y protegida (no se cierra automáticamente).")
 
             conn.close()
             await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas=set(tabs_oferta) if res_tipo not in ["ok", "ya_postulado", "cerrada", "descartada_desc", "requiere_login", "captcha_antibot"] else None)
