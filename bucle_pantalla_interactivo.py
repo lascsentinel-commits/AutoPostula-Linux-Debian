@@ -2184,7 +2184,7 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
             const opts = inputs.map(inp => ({ inp, ...getOptText(inp) }));
             let chosen = null;
 
-            const isNoExpected = qtxt.includes("inclusi") || qtxt.includes("ley 21.015") || qtxt.includes("ajuste razonable") || qtxt.includes("discapacidad") || qtxt.includes("vacaciones programadas") || qtxt.includes("6 meses") || qtxt.includes("seis meses") || qtxt.includes("mínimo de 6") || qtxt.includes("minimo de 6");
+            const isNoExpected = qtxt.includes("inclusi") || qtxt.includes("ley 21.015") || qtxt.includes("ajuste razonable") || qtxt.includes("discapacidad") || qtxt.includes("vacaciones programadas") || qtxt.includes("6 meses") || qtxt.includes("seis meses") || qtxt.includes("mínimo de 6") || qtxt.includes("minimo de 6") || qtxt.includes("trabajado alguna vez") || qtxt.includes("trabajado antes") || qtxt.includes("proyecto con") || qtxt.includes("filial") || qtxt.includes("previousworker");
 
             if (qtxt.includes("carrera") || qtxt.includes("título") || qtxt.includes("profesión")) {
                 const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -2314,6 +2314,222 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
     return qa_list
 
 
+async def _rellenar_paso_workday(page):
+    """Completa controles especiales de Workday (React spinbuttons, comboboxes, listboxes y datos reales) en pasos 2..5."""
+    perfil = _cargar_perfil_usuario()
+
+    async def _type_spin(loc, val: str):
+        await loc.evaluate("el => { el.scrollIntoView({block:'center'}); el.focus(); el.select?.(); }")
+        await asyncio.sleep(0.1)
+        await page.keyboard.press("Control+a")
+        await page.keyboard.type(str(val), delay=35)
+        await page.keyboard.press("Tab")
+        await asyncio.sleep(0.15)
+
+    # A. Paso Mi información: corregir nombres all-caps erróneos del parser CV y asegurar teléfono sin prefijo duplicado
+    try:
+        fn = page.locator("#name--legalName--firstName, input[name='legalName--firstName']").first
+        if await fn.count() > 0 and await fn.is_visible():
+            cur_fn = (await fn.input_value() or "").strip()
+            if not cur_fn or cur_fn.upper() in ["MAESTRO", "INTEGRAL", "CV", "CURRICULUM"] or (cur_fn.isupper() and len(cur_fn) > 3):
+                await fn.fill(perfil["primer_nombre"], force=True)
+        ln = page.locator("#name--legalName--lastName, input[name='legalName--lastName']").first
+        if await ln.count() > 0 and await ln.is_visible():
+            cur_ln = (await ln.input_value() or "").strip()
+            if not cur_ln or cur_ln.upper() in ["MAESTRO", "INTEGRAL", "CV", "CURRICULUM"] or (cur_ln.isupper() and len(cur_ln) > 3):
+                await ln.fill(perfil["primer_apellido"], force=True)
+        sln = page.locator("#name--legalName--secondaryLastName, input[name='legalName--secondaryLastName']").first
+        if await sln.count() > 0 and await sln.is_visible():
+            cur_sln = (await sln.input_value() or "").strip()
+            if not cur_sln and perfil.get("segundo_apellido"):
+                await sln.fill(perfil["segundo_apellido"], force=True)
+
+        ph_inp = page.locator("#phoneNumber--phoneNumber, input[name='phoneNumber']").first
+        if await ph_inp.count() > 0 and await ph_inp.is_visible():
+            has_56 = await page.evaluate("() => document.body.innerText.includes('Chile (+56)')")
+            if has_56:
+                cur_ph = (await ph_inp.input_value() or "").strip()
+                if cur_ph.startswith("+56"):
+                    await ph_inp.fill("9 4850 8528", force=True)
+    except Exception:
+        pass
+
+    # B. Paso Mi información: radio "¿Ha trabajado alguna vez..." -> siempre No
+    try:
+        fs_no = page.locator("fieldset:has-text('trabajado') label:text-is('No'), fieldset:has-text('filial') label:text-is('No'), label[for='p00nb']").first
+        if await fs_no.count() > 0 and await fs_no.is_visible():
+            inp_no = page.locator("fieldset:has-text('trabajado') input[value='false'], input[name='candidateIsPreviousWorker'][value='false'], #p00nb").first
+            if await inp_no.count() > 0 and not await inp_no.is_checked():
+                await fs_no.scroll_into_view_if_needed()
+                await fs_no.click()
+                await asyncio.sleep(0.3)
+                if not await inp_no.is_checked():
+                    await inp_no.check(force=True)
+    except Exception:
+        pass
+
+    # C. Paso Mi información: "¿Cómo nos ha conocido?" (#source--source)
+    try:
+        src = page.locator("#source--source").first
+        if await src.count() > 0 and await src.is_visible():
+            ya_sel = await src.evaluate("el => !!el.closest('[data-automation-id]')?.querySelector('li[data-automation-id=\"menuItem\"]')")
+            if not ya_sel:
+                await src.scroll_into_view_if_needed()
+                await src.fill("", force=True)
+                await src.click(force=True)
+                await asyncio.sleep(0.9)
+                opt_src = page.locator("[role='option']:has-text('LinkedIn'), [role='option']:has-text('Red social'), [role='option']:has-text('Redes sociales'), [role='option']:has-text('Corporate Citizenship'), [data-automation-id='promptOption']").first
+                if await opt_src.count() > 0 and await opt_src.is_visible():
+                    await opt_src.click(force=True)
+                    await asyncio.sleep(0.8)
+                    sub_src = page.locator("[role='option']:has-text('LinkedIn'), [data-automation-id='promptOption']").first
+                    if await sub_src.count() > 0 and await sub_src.is_visible():
+                        await sub_src.click(force=True)
+                        await asyncio.sleep(0.5)
+    except Exception:
+        pass
+
+    # D. Paso Mi experiencia: eliminar bloques erróneos del parser y llenar fechas reales en spinbuttons + educación Duoc UC
+    try:
+        # Eliminar bloques basura del parser CV (ej. "Arquitectura integral", "ASA")
+        titles = await page.locator("input[id^='workExperience-'][id$='--jobTitle']").all()
+        comps = await page.locator("input[id^='workExperience-'][id$='--companyName']").all()
+        for c_loc in reversed(comps):
+            try:
+                c_val = (await c_loc.input_value() or "").strip().lower()
+                if any(b in c_val for b in ["arquitectura integral", "asa", "maestro"]):
+                    del_b = c_loc.locator("xpath=ancestor::div[contains(@aria-labelledby, 'Experiencia')]//button[contains(., 'Eliminar')]").first
+                    if await del_b.count() > 0 and await del_b.is_visible():
+                        await del_b.evaluate("el => el.scrollIntoView({block:'center'})")
+                        await del_b.click(force=True)
+                        await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+        # Fechas en experiencias restantes (BDO Chile 03/2025 - 07/2025 por defecto)
+        sm_locs = await page.locator("input[id^='workExperience-'][id$='--startDate-dateSectionMonth-input']").all()
+        sy_locs = await page.locator("input[id^='workExperience-'][id$='--startDate-dateSectionYear-input']").all()
+        em_locs = await page.locator("input[id^='workExperience-'][id$='--endDate-dateSectionMonth-input']").all()
+        ey_locs = await page.locator("input[id^='workExperience-'][id$='--endDate-dateSectionYear-input']").all()
+        for idx, sm in enumerate(sm_locs):
+            if not (await sm.input_value() or "").strip():
+                await _type_spin(sm, "03")
+                if idx < len(sy_locs) and not (await sy_locs[idx].input_value() or "").strip():
+                    await _type_spin(sy_locs[idx], "2025")
+            if idx < len(em_locs) and not (await em_locs[idx].input_value() or "").strip():
+                await _type_spin(em_locs[idx], "07")
+                if idx < len(ey_locs) and not (await ey_locs[idx].input_value() or "").strip():
+                    await _type_spin(ey_locs[idx], "2025")
+
+        # Educación: Duoc UC, Titulación y años 2023-2026
+        sch = page.locator("input[id^='education-'][id$='--school']").first
+        if await sch.count() > 0 and await sch.is_visible():
+            ya_sch = await sch.evaluate("el => !!el.closest('[data-automation-id]')?.querySelector('li[data-automation-id=\"menuItem\"]')")
+            if not ya_sch and not (await sch.input_value() or "").strip():
+                await sch.evaluate("el => { el.scrollIntoView({block:'center'}); el.focus(); }")
+                await page.keyboard.type("Duoc", delay=40)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(1.2)
+                opt_duoc = page.locator("[role='option'], [data-automation-id='promptOption']").filter(has_text="Duoc").first
+                if await opt_duoc.count() > 0 and await opt_duoc.is_visible():
+                    await opt_duoc.click(force=True)
+                    await asyncio.sleep(0.5)
+
+        deg = page.locator("button[id^='education-'][id$='--degree']").first
+        if await deg.count() > 0 and await deg.is_visible():
+            if "seleccione" in (await deg.inner_text() or "").lower():
+                await deg.evaluate("el => el.scrollIntoView({block:'center'})")
+                await deg.click(force=True)
+                await asyncio.sleep(0.8)
+                for kw in ["Ingenier", "Licenciatura", "Universitario", "Bachelor", "Técnico", "Otro"]:
+                    cand = page.locator("ul[role='listbox'] li[role='option'], div[role='listbox'] [role='option']").filter(has_text=kw).first
+                    if await cand.count() > 0 and await cand.is_visible():
+                        await cand.click(force=True)
+                        await asyncio.sleep(0.4)
+                        break
+
+        fos = page.locator("input[id^='education-'][id$='--fieldOfStudy']").first
+        if await fos.count() > 0 and await fos.is_visible():
+            ya_fos = await fos.evaluate("el => !!el.closest('[data-automation-id]')?.querySelector('li[data-automation-id=\"menuItem\"]')")
+            if not ya_fos and not (await fos.input_value() or "").strip():
+                await fos.evaluate("el => { el.scrollIntoView({block:'center'}); el.focus(); }")
+                await page.keyboard.type("Informática", delay=40)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(1.0)
+                opt_fos = page.locator("[role='option']:has-text('Inform'), [data-automation-id='promptOption']").first
+                if await opt_fos.count() > 0 and await opt_fos.is_visible():
+                    await opt_fos.click(force=True)
+                    await asyncio.sleep(0.4)
+
+        edu_fy = page.locator("input[id^='education-'][id$='--firstYearAttended-dateSectionYear-input']").first
+        if await edu_fy.count() > 0 and not (await edu_fy.input_value() or "").strip():
+            await _type_spin(edu_fy, "2023")
+        edu_ly = page.locator("input[id^='education-'][id$='--lastYearAttended-dateSectionYear-input']").first
+        if await edu_ly.count() > 0 and not (await edu_ly.input_value() or "").strip():
+            await _type_spin(edu_ly, "2026")
+    except Exception:
+        pass
+
+    # E. Paso Preguntas de solicitud: botones listbox de primaryQuestionnaire
+    try:
+        q_items = await page.evaluate("""() => [...document.querySelectorAll("button[aria-haspopup=listbox][id^=primaryQuestionnaire]")].map(b => {
+            let p = b.parentElement;
+            let qtxt = "";
+            for (let k=0; k<5 && p; k++) {
+                const t = (p.innerText || "").trim();
+                if (t.includes("?")) { qtxt = t.split("\\n")[0]; break; }
+                p = p.parentElement;
+            }
+            return {id: b.id, cur: b.innerText.trim(), qtxt};
+        })""")
+        for q in q_items:
+            if "seleccione" not in q["cur"].lower():
+                continue
+            qid = q["id"]
+            qt = q["qtxt"].lower()
+            btn = page.locator("[id=\"" + qid + "\"]").first
+            await btn.evaluate("el => el.scrollIntoView({block:'center'})")
+            await btn.click()
+            await asyncio.sleep(0.6)
+            opts = await page.evaluate("""() => {
+                const lists = [...document.querySelectorAll("ul[role=listbox], div[role=listbox]")].filter(l => l.offsetParent !== null);
+                const last = lists[lists.length - 1];
+                return last ? [...last.querySelectorAll("[role=option], li")].map(o => (o.innerText||"").trim()).filter(Boolean) : [];
+            }""")
+            es_no = any(k in qt for k in ["proyecto con accenture", "24 meses", "trabajado antes", "trabajado alguna vez", "filial", "ajuste razonable", "discapacidad", "inclusi"])
+            if es_no:
+                pick = next((o for o in opts if o.lower() == "no"), opts[-1] if opts else None)
+            else:
+                pick = next((o for o in opts if o.lower() in ["sí", "si", "yes"] or any(w in o.lower() for w in ["acepto", "consiento", "autorizo", "implicando inteligencia artificial"])), None)
+                if not pick and len(opts) > 1:
+                    pick = opts[1]
+            if pick:
+                await page.locator("ul[role='listbox'] li[role='option'], div[role='listbox'] [role='option']").filter(has_text=pick).last.click()
+                await asyncio.sleep(0.35)
+    except Exception:
+        pass
+
+    # F. Paso Revelación voluntaria: género = Hombre y checkbox Acepto términos
+    try:
+        gbtn = page.locator("#personalInfoPerson--gender, button[aria-haspopup='listbox'][id$='--gender']").first
+        if await gbtn.count() > 0 and await gbtn.is_visible() and "seleccione" in (await gbtn.inner_text() or "").lower():
+            await gbtn.evaluate("el => el.scrollIntoView({block:'center'})")
+            await gbtn.click()
+            await asyncio.sleep(0.7)
+            for gk in ["Hombre", "Masculino", "Male", "Varón"]:
+                gopt = page.locator("ul[role='listbox'] li[role='option'], div[role='listbox'] [role='option']").filter(has_text=gk).last
+                if await gopt.count() > 0 and await gopt.is_visible():
+                    await gopt.click()
+                    await asyncio.sleep(0.35)
+                    break
+        tchk = page.locator("#termsAndConditions--acceptTermsAndAgreements").first
+        if await tchk.count() > 0 and not await tchk.is_checked():
+            await tchk.evaluate("el => el.scrollIntoView({block:'center'})")
+            await tchk.check(force=True)
+    except Exception:
+        pass
+
+
 async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> list[dict]:
     """Completa formularios de 1 o múltiples pasos en LinkedIn Easy Apply (<dialog open> o role=dialog) y portales ATS externos (CSOD, AIRA, Buk, Workday, Pandape, etc.), rellenando datos personales, CV PDF y preguntas."""
     qa_acumulada = []
@@ -2336,6 +2552,8 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
     print(f"🔗 Detectado asistente multipaso ({modo})...")
 
     for paso in range(1, 8):
+        if "myworkdayjobs.com" in url_low:
+            await _rellenar_paso_workday(page)
         await autocompletar_datos_personales_y_cv(page)
         qa_step = await rellenar_formulario_actual(page, empresa, titulo)
         qa_acumulada.extend(qa_step)
