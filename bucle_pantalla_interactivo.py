@@ -1245,7 +1245,7 @@ async def manejar_redireccion_externa(page):
         except Exception:
             pass
 
-        # Si abrió una nueva pestaña tras pulsar Entendido/Continuar, cambiar el foco del bot hacia ella
+        # Si abrió una nueva pestaña tras pulsar Entendido/Continuar, cerrar la intermedia y cambiar el foco del bot hacia ella
         tabs_despues = list(page.context.pages)
         if len(tabs_despues) > len(tabs_antes):
             nueva_tab = [t for t in tabs_despues if t not in tabs_antes][-1]
@@ -1254,7 +1254,13 @@ async def manejar_redireccion_externa(page):
                 await nueva_tab.wait_for_load_state("domcontentloaded", timeout=15000)
             except Exception:
                 pass
+            old_page = page
             page = nueva_tab
+            try:
+                if old_page and old_page != page and "localhost:8087" not in (old_page.url or ""):
+                    await old_page.close()
+            except Exception:
+                pass
             await page.bring_to_front()
             await asyncio.sleep(2.0)
             await inyectar_boton_flotante_control(page)
@@ -1285,6 +1291,10 @@ async def manejar_redireccion_externa(page):
                 "button:has-text('APLICAR A ESTE PROCESO')",
                 "a:has-text('Postúlate Ahora')",
                 "button:has-text('Postúlate Ahora')",
+                "a:has-text('Rellenar automáticamente con currículo')",
+                "button:has-text('Rellenar automáticamente con currículo')",
+                "a:has-text('Autofill with Resume')",
+                "button[data-automation-id='SignInWithEmailButton']",
                 "button:has-text('Solicitar ahora')",
                 "a:has-text('Solicitar ahora')",
                 "button:has-text('Postular ahora')",
@@ -1303,8 +1313,8 @@ async def manejar_redireccion_externa(page):
                             en_zona_ajena = await loc.evaluate("el => !!(el.closest('header, nav, footer, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden=\"true\"]'))")
                             if en_zona_ajena:
                                 continue
-                            # Evitar repetir clic si ya estamos dentro de un formulario activo (/application o con inputs)
-                            ya_en_form = await page.locator("input[type='email']:visible, input[type='file'], input[type='password']:visible, input[name*='name']:visible").count() > 0
+                            # Evitar repetir clic si ya estamos dentro de un formulario activo (/application o con inputs de login/contacto)
+                            ya_en_form = await page.locator("input[type='email']:visible, input[data-automation-id='email']:visible, input[type='file'], input[type='password']:visible, input[name*='name']:visible").count() > 0
                             if ya_en_form:
                                 break
                             txt_cta = (await loc.inner_text() or "").strip()
@@ -1312,7 +1322,7 @@ async def manejar_redireccion_externa(page):
                             await loc.scroll_into_view_if_needed()
                             await loc.click(timeout=5000)
                             clic_redir = True
-                            await asyncio.sleep(2.5)
+                            await asyncio.sleep(3.0)
                             # Si abrió dropdown de Pandape, seleccionar de inmediato Redactar currículum (/ApplyCT/)
                             if "pandape" in page.url.lower():
                                 dd_item = page.locator(".dropdown-menu.show a[href*='ApplyCT'], .dropdown-menu.show a:has-text('Redactar currículum')").first
@@ -1334,7 +1344,13 @@ async def manejar_redireccion_externa(page):
                     await nueva_tab.wait_for_load_state("domcontentloaded", timeout=15000)
                 except Exception:
                     pass
+                old_page = page
                 page = nueva_tab
+                try:
+                    if old_page and old_page != page and "localhost:8087" not in (old_page.url or ""):
+                        await old_page.close()
+                except Exception:
+                    pass
                 await page.bring_to_front()
                 await asyncio.sleep(1.5)
                 await inyectar_boton_flotante_control(page)
@@ -1409,15 +1425,18 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
         except Exception:
             pass
     reglas_texto = [
-        (["sueldo", "salario", "salariopretendido", "renta pretendida", "remuneración", "remuneracion"], "0"),
+        (["sueldo", "salario", "salariopretendido", "renta pretendida", "remuneración", "remuneracion", "salarymin"], "0"),
+        (["fecha de nacimiento", "birthdate", "birth date", "nacimiento"], "11/02/2000"),
+        (["addressnumber", "número de calle", "numero exterior", "nro casa"], "100"),
+        (["addresscomplement", "complemento"], "Depto 1"),
         (["nombre completo", "full name", "nombre y apellido"], perfil["nombre_completo"]),
         (["primer apellido", "apellido paterno", "last name", "surname", "apellidos", "apellido"], perfil["apellidos"]),
         (["segundo nombre", "middle name"], ""),
         (["primer nombre", "first name", "nombre", "nombres", "given name"], perfil["primer_nombre"]),
         (["correo", "email", "e-mail", "mail"], perfil["email_login"] if es_contexto_login_o_cuenta else perfil["email"]),
         (["teléfono", "telefono", "celular", "móvil", "movil", "phone", "mobile", "whatsapp"], perfil["telefono"]),
-        (["rut", "run", "dni", "cédula", "cedula", "identificación", "documento"], perfil["rut"]),
-        (["línea de dirección 2", "address line 2", "depto", "departamento"], ""),
+        (["rut", "run", "dni", "cédula", "cedula", "identificación", "documento", "cpf"], perfil["rut"]),
+        (["línea de dirección 2", "address line 2"], ""),
         (["línea de dirección", "dirección", "direccion", "address", "domicilio", "calle"], perfil["direccion"]),
         (["comuna", "district"], perfil["comuna"]),
         (["ciudad", "city", "localidad"], perfil["ciudad"]),
@@ -1432,6 +1451,9 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
         try:
             meta = await inp.evaluate(r'''el => {
                 if (el.dataset.autopostulaFilled === '1' || el.disabled || el.readOnly) return {skip: true};
+                if (el.getAttribute('data-automation-id') === 'beecatcher') return {skip: true};
+                const parentTxt = (el.closest('div, label, fieldset')?.innerText || '').toLowerCase();
+                if (parentTxt.includes('for robots only') || parentTxt.includes('do not enter if you')) return {skip: true};
                 if (el.closest('header') || el.closest('nav') || el.closest('footer') || el.closest('.search-box') || el.closest('#search')) return {skip: true};
                 const val = (el.value || '').trim();
                 if (val.length > 0) return {skip: true};
@@ -1572,6 +1594,28 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
 
     if completados > 0:
         print(f"🪪 Autocompletados {completados} campos de identidad, contacto, ubicación y/o CV PDF.")
+
+    # 4. Marcar checkboxes de privacidad / términos obligatorios (sin marcar discapacidad ni "sin número")
+    for tgt in frames_seguros:
+        try:
+            chk_cnt = await tgt.evaluate(r'''() => {
+                let c = 0;
+                const chks = Array.from(document.querySelectorAll('input[type="checkbox"]')).filter(e => e.offsetParent !== null && !e.disabled && !e.checked);
+                for (const el of chks) {
+                    const idn = ((el.id || '') + ' ' + (el.name || '')).toLowerCase();
+                    if (/deficiency|discapacidad|withoutnumber|checkBoxSN/i.test(idn)) continue;
+                    const lbl = (document.querySelector('label[for="' + CSS.escape(el.id) + '"]')?.innerText || el.closest('label')?.innerText || el.parentElement?.innerText || '').toLowerCase();
+                    if (/privacidad|privacy|términos|terminos|condiciones|accept_privacy|hasacceptedterms/i.test(idn + ' ' + lbl)) {
+                        el.click();
+                        c++;
+                    }
+                }
+                return c;
+            }''')
+            completados += chk_cnt or 0
+        except Exception:
+            pass
+
     return completados
 
 
@@ -1597,6 +1641,9 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
                 continue
             es_valido = await el.evaluate(r'''el => {
                 if (el.dataset.autopostulaFilled === '1' || el.disabled || el.readOnly || el.name === 'supportTextfield' || el.closest('[aria-hidden="true"]')) return false;
+                if (el.getAttribute('data-automation-id') === 'beecatcher') return false;
+                const ptxt = (el.closest('div, label, fieldset')?.innerText || '').toLowerCase();
+                if (ptxt.includes('for robots only') || ptxt.includes('do not enter if you')) return false;
                 if (el.type === 'search' || el.type === 'hidden' || el.type === 'submit' || el.type === 'radio' || el.type === 'checkbox' || el.type === 'file' || el.type === 'email' || el.type === 'tel') return false;
                 if (el.closest('header') || el.closest('nav') || el.closest('footer') || el.closest('#navbar') || el.closest('.search-box') || el.closest('#search') || el.closest('.filters') || el.closest('.sidebar') || el.closest('.banner')) return false;
                 
@@ -2311,19 +2358,25 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if any(w in body_tras_clic for w in FRASES_CERRADA):
         return "cerrada", "Oferta cerrada o expirada en el portal (detectado tras clic inicial)"
 
-    # Comprobar si el portal externo exige iniciar sesión / cuenta o presenta CAPTCHA antibot (Cloudflare Turnstile / reCAPTCHA)
+    # Comprobar si el portal externo presenta CAPTCHA antibot (Cloudflare Turnstile / reCAPTCHA / hCaptcha) o muro de sesión/registro
+    await asyncio.sleep(0.8)
+    tiene_captcha_frame = any(
+        any(k in (fr.url or "").lower() for k in ["turnstile", "recaptcha", "hcaptcha", "challenges.cloudflare"])
+        for fr in page.frames
+    )
     diag_bloqueo = await page.evaluate(r'''() => {
         const hasPass = Array.from(document.querySelectorAll('input[type="password"]')).some(e => e.offsetParent !== null);
         const editableNoLogin = Array.from(document.querySelectorAll('textarea, input[type="tel"], input[type="file"]')).some(e => e.offsetParent !== null && !e.readOnly && !e.disabled);
         const hasCaptchaFrame = Array.from(document.querySelectorAll('iframe')).some(f => /turnstile|recaptcha|hcaptcha|challenges\.cloudflare/i.test(f.src || ''));
         return {hasPass, editableNoLogin, hasCaptchaFrame};
     }''')
-    if diag_bloqueo.get("hasPass") and not diag_bloqueo.get("editableNoLogin") and any(w in body_tras_clic for w in ["iniciar sesión", "inicio de sesión", "crear cuenta", "registrarse", "sign in", "create account", "ingresar a tu cuenta"]):
-        print(f"🔑 Portal externo requiere inicio de sesión o registro manual ({page.url[:70]}). Saltando sin esperar 30s.")
-        return "requiere_login", f"Portal externo exige inicio de sesión manual: {page.url}"
-    if diag_bloqueo.get("hasCaptchaFrame") or any(w in body_tras_clic for w in ["verify you are human", "no soy un robot"]):
+    if tiene_captcha_frame or diag_bloqueo.get("hasCaptchaFrame") or any(w in body_tras_clic for w in ["verify you are human", "no soy un robot"]):
         print(f"🛡️ Portal externo bloqueado por verificación antibot/CAPTCHA ({page.url[:70]}). Respetando política sin automatizar CAPTCHA.")
         return "captcha_antibot", f"Portal externo requiere verificación humana / CAPTCHA manual: {page.url}"
+    if diag_bloqueo.get("hasPass") and not diag_bloqueo.get("editableNoLogin") and any(w in body_tras_clic for w in ["iniciar sesión", "inicio de sesión", "crear cuenta", "registrarse", "sign in", "create account", "ingresar a tu cuenta"]):
+        await autocompletar_datos_personales_y_cv(page)
+        print(f"🔑 Portal externo requiere inicio de sesión o registro manual ({page.url[:70]}). Correo completado con perfil personal; saltando espera.")
+        return "requiere_login", f"Portal externo exige inicio de sesión manual: {page.url}"
 
     # Verificar parada o pausa tras clic inicial
     st = await comprobar_pausa_y_parada(page)
