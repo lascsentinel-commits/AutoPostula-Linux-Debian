@@ -313,7 +313,8 @@ FRASES_CERRADA = [
     "solicitudes cerradas", "no admite más solicitudes",
     "oferta finalizada", "oferta cerrada", "proceso finalizado", "ya no está disponible",
     "aviso finalizado", "404", "ha cerrado su proceso", "ya ha cerrado", "cerrado su proceso",
-    "proceso de postulación cerrado", "este aviso ha expirado", "la publicación ha finalizado",
+    "proceso de postulación cerrado", "este aviso ha expirado", "este anuncio ha expirado",
+    "anuncio ha expirado", "ha sido desactivado por el empleador", "la publicación ha finalizado",
     "esta oferta ha expirado", "esta búsqueda ha finalizado", "convocatoria ha finalizado",
     "oferta pausada", "no se encuentra disponible", "lo sentimos! esta oferta",
     "lo sentimos, esta oferta", "esta oferta ya no", "no disponible actualmente"
@@ -1103,6 +1104,8 @@ async def pulsar_segundo_postular(page) -> bool:
         "dialog[open] button:has-text('Enviar solicitud')",
         "dialog[open] button:has-text('Submit application')",
         "div[role='dialog'] button:has-text('Enviar solicitud')",
+        "input[type='submit'].enviar-postula",
+        "input[type='submit'][value*='Enviar postulación' i]",
         "div.jobs-easy-apply-modal button:has-text('Enviar solicitud')",
         "button:has-text('Enviar solicitud')",
         "button#postulation-questions",
@@ -1841,7 +1844,7 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
                     const idn = ((el.id || '') + ' ' + (el.name || '')).toLowerCase();
                     if (/deficiency|discapacidad|withoutnumber|checkBoxSN/i.test(idn)) continue;
                     const lbl = (document.querySelector('label[for="' + CSS.escape(el.id) + '"]')?.innerText || el.closest('label')?.innerText || el.parentElement?.innerText || '').toLowerCase();
-                    if (/privacidad|privacy|términos|terminos|condiciones|accept_privacy|hasacceptedterms/i.test(idn + ' ' + lbl)) {
+                    if (/privacidad|privacy|términos|terminos|condiciones|accept_privacy|hasacceptedterms|disponibilidad inmediata|dispoin/i.test(idn + ' ' + lbl)) {
                         el.click();
                         c++;
                     }
