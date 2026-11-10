@@ -333,7 +333,18 @@ GLOBAL_BOT_CONTROL = {
 
 _WIDGET_JS = """
 (() => {
-    const WIDGET_VER = '4.2';
+    if (window.top !== window.self) {
+        const cleanIframeWidget = () => {
+            document.querySelectorAll('#autopostula-root-container, #autopostula-floating-control').forEach(el => el.remove());
+        };
+        cleanIframeWidget();
+        if (!window.__ap_iframe_clean_bound) {
+            window.__ap_iframe_clean_bound = true;
+            document.addEventListener('DOMContentLoaded', cleanIframeWidget, { once: true });
+        }
+        return;
+    }
+    const WIDGET_VER = '4.3';
     window.__autopostula_widget_version = WIDGET_VER;
     if (window.__autopostula_interval && window.__autopostula_interval_ver !== WIDGET_VER) {
         clearInterval(window.__autopostula_interval);
@@ -425,7 +436,11 @@ _WIDGET_JS = """
         const targetParent = document.documentElement || document.body;
         if (!targetParent) return;
 
-        let root = document.getElementById('autopostula-root-container');
+        const allRoots = Array.from(document.querySelectorAll('#autopostula-root-container'));
+        for (let k = 1; k < allRoots.length; k++) allRoots[k].remove();
+        document.querySelectorAll('#autopostula-floating-control').forEach(el => el.remove());
+
+        let root = allRoots[0] || document.getElementById('autopostula-root-container');
         const esViejo = root && root.getAttribute('data-ap-ver') !== WIDGET_VER;
         if (!root || root.parentElement !== targetParent || esViejo) {
             if (root && root.remove) root.remove();
@@ -823,13 +838,25 @@ async def sincronizar_widgets_navegador(browser):
 
     async def _poll_pg(pg):
         try:
+            for fr in pg.frames[1:]:
+                try:
+                    await fr.evaluate("""() => {
+                        if (window.__autopostula_interval) {
+                            clearInterval(window.__autopostula_interval);
+                            window.__autopostula_interval = null;
+                        }
+                        document.querySelectorAll('#autopostula-root-container, #autopostula-floating-control').forEach(e => e.remove());
+                    }""")
+                except Exception:
+                    pass
             res = await pg.evaluate('''() => {
                 const cmd = window.__autopostula_pending_cmd || null;
                 window.__autopostula_pending_cmd = null;
                 return {
                     ready: (
                         typeof window.__autopostula_sync_state === 'function' &&
-                        window.__autopostula_widget_version === '4.2' &&
+                        window.__autopostula_widget_version === '4.3' &&
+                        document.querySelectorAll('#autopostula-root-container').length === 1 &&
                         !!document.getElementById('autopostula-modal-autodesc')
                     ),
                     cmd
@@ -888,19 +915,17 @@ async def desactivar_widgets_navegador(browser):
         return
     for ctx in list(browser.contexts):
         for pg in list(ctx.pages):
-            try:
-                await pg.evaluate('''() => {
-                    if (window.__autopostula_interval) {
-                        clearInterval(window.__autopostula_interval);
-                        window.__autopostula_interval = null;
-                    }
-                    const root = document.getElementById('autopostula-root-container');
-                    if (root) root.remove();
-                    const old = document.getElementById('autopostula-floating-control');
-                    if (old) old.remove();
-                }''')
-            except Exception:
-                pass
+            for fr in list(pg.frames):
+                try:
+                    await fr.evaluate('''() => {
+                        if (window.__autopostula_interval) {
+                            clearInterval(window.__autopostula_interval);
+                            window.__autopostula_interval = null;
+                        }
+                        document.querySelectorAll('#autopostula-root-container, #autopostula-floating-control').forEach(el => el.remove());
+                    }''')
+                except Exception:
+                    pass
 
 
 async def inyectar_boton_flotante_control(page):
@@ -1142,6 +1167,8 @@ def _cargar_perfil_usuario() -> dict:
         "segundo_apellido": "Ríos",
         "apellidos": "Elgueta Ríos",
         "email": "dh.elgueta@duocuc.cl",
+        "email_login": "correof1553@gmail.com",
+        "sexo": "Hombre",
         "telefono": "+56 9 4850 8528",
         "rut": "20.338.608-7",
         "direccion": "Las Condes, Santiago",
@@ -1174,7 +1201,7 @@ def _cargar_perfil_usuario() -> dict:
                 perfil["primer_nombre"] = partes[0]
                 perfil["apellidos"] = " ".join(partes[1:])
                 perfil["primer_apellido"] = partes[1]
-            for k_db, k_dst in [("email", "email"), ("telefono", "telefono"), ("rut", "rut"), ("comuna", "comuna"), ("region", "region"), ("institucion", "institucion"), ("carrera", "carrera"), ("ruta_cv_pdf", "ruta_cv")]:
+            for k_db, k_dst in [("email", "email"), ("email_secundario", "email_login"), ("telefono", "telefono"), ("rut", "rut"), ("comuna", "comuna"), ("region", "region"), ("institucion", "institucion"), ("carrera", "carrera"), ("ruta_cv_pdf", "ruta_cv")]:
                 if r.get(k_db):
                     perfil[k_dst] = str(r[k_db]).strip()
             if perfil["comuna"]:
@@ -1354,14 +1381,40 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
                 print(f"Aviso adjuntando CV en input file: {e}")
 
     # 2. Autocompletado de campos de texto/email/tel personal si están vacíos
-    inputs = await page.locator("input[type='text']:visible, input[type='email']:visible, input[type='tel']:visible, input[type='url']:visible, input:not([type]):visible").all()
+    try:
+        es_contexto_login_o_cuenta = await page.evaluate(r'''() => {
+            const u = location.href.toLowerCase();
+            const bt = (document.body?.innerText || '').toLowerCase().slice(0, 5000);
+            const hasPass = Array.from(document.querySelectorAll('input[type="password"]')).some(e => e.offsetParent !== null);
+            const urlAuth = ['/login', '/signin', '/sign-in', '/register', '/signup', '/create-account', '/crear-cuenta', '/iniciar', '/auth', '/applyct', 'icims.com'].some(k => u.includes(k));
+            const txtAuth = ['iniciar sesión', 'inicia sesión', 'inicio de sesión', 'crear cuenta', 'crea tu cuenta', 'regístrate', 'registrarse', 'sign in', 'create account', 'log in', 'identificar tu candidatura'].some(k => bt.includes(k));
+            return hasPass || urlAuth || txtAuth;
+        }''')
+    except Exception:
+        es_contexto_login_o_cuenta = False
+
+    inputs = []
+    frames_seguros = [page] + [
+        fr for fr in page.frames[1:]
+        if fr.url and not any(k in fr.url.lower() for k in ["captcha", "turnstile", "challenges.cloudflare", "about:blank"])
+    ]
+    for tgt in frames_seguros:
+        try:
+            loc_inps = await tgt.locator("input[type='text']:visible, input[type='email']:visible, input[type='tel']:visible, input[type='url']:visible, input:not([type]):visible").all()
+            if tgt == page:
+                inputs.extend(loc_inps)
+            else:
+                # En iframes externos seguros (ej. iCIMS login), procesar también campos de correo/cuenta/contacto
+                inputs.extend([el for el in loc_inps])
+        except Exception:
+            pass
     reglas_texto = [
         (["sueldo", "salario", "salariopretendido", "renta pretendida", "remuneración", "remuneracion"], "0"),
         (["nombre completo", "full name", "nombre y apellido"], perfil["nombre_completo"]),
         (["primer apellido", "apellido paterno", "last name", "surname", "apellidos", "apellido"], perfil["apellidos"]),
         (["segundo nombre", "middle name"], ""),
         (["primer nombre", "first name", "nombre", "nombres", "given name"], perfil["primer_nombre"]),
-        (["correo", "email", "e-mail", "mail"], perfil["email"]),
+        (["correo", "email", "e-mail", "mail"], perfil["email_login"] if es_contexto_login_o_cuenta else perfil["email"]),
         (["teléfono", "telefono", "celular", "móvil", "movil", "phone", "mobile", "whatsapp"], perfil["telefono"]),
         (["rut", "run", "dni", "cédula", "cedula", "identificación", "documento"], perfil["rut"]),
         (["línea de dirección 2", "address line 2", "depto", "departamento"], ""),
@@ -1411,8 +1464,13 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
                 continue
 
             valor = None
-            if meta.get("type") == "email":
-                valor = perfil["email"]
+            if meta.get("type") == "email" or any(k in etiqueta for k in ["correo", "email", "e-mail", "mail"]):
+                if any(k in etiqueta for k in ["institucional", "duoc"]):
+                    valor = perfil["email"]
+                elif es_contexto_login_o_cuenta or any(k in etiqueta for k in ["personal", "gmail", "cuenta", "login", "iniciar", "registr"]):
+                    valor = perfil["email_login"]
+                else:
+                    valor = perfil["email"]
             elif meta.get("type") == "tel":
                 valor = perfil["telefono"]
             elif any(s in etiqueta for s in ["sueldo", "salario", "renta pretendida", "remunerac"]):
@@ -1424,23 +1482,18 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
                         break
 
             if valor:
-                await inp.fill(valor)
+                await inp.fill(valor, force=True)
                 await inp.evaluate("el => { el.dataset.autopostulaFilled = '1'; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); el.dispatchEvent(new Event('blur', {bubbles:true})); }")
                 completados += 1
         except Exception:
             pass
 
-    # 3. Autocompletado de <select> comunes de país/región/comuna si están sin seleccionar
+    # 3. Autocompletado de <select> comunes (género=Hombre, estado civil=Soltero, hijos=No, país/región/comuna)
     try:
-        sel_count = await page.evaluate('''(perfil) => {
+        sel_count = await page.evaluate(r'''(perfil) => {
             let cnt = 0;
             const selects = Array.from(document.querySelectorAll('select')).filter(s => s.offsetParent !== null && !s.disabled);
             for (const s of selects) {
-                const selOpt = s.options[s.selectedIndex];
-                const curTxt = (selOpt ? selOpt.text : '').trim().toLowerCase();
-                const isPlaceholder = !s.value || curTxt.includes('seleccione') || curTxt.includes('select') || curTxt === '--';
-                if (!isPlaceholder) continue;
-
                 let lbl = ((s.id || '') + ' ' + (s.name || '') + ' ' + (s.getAttribute('aria-label') || '')).toLowerCase();
                 let p = s.parentElement;
                 for (let k = 0; k < 4 && p; k++) {
@@ -1448,6 +1501,53 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
                     if (l) { lbl += ' ' + l.innerText.toLowerCase(); break; }
                     p = p.parentElement;
                 }
+                const optsArr = Array.from(s.options);
+                const optsTxt = optsArr.map(o => o.text.trim().toLowerCase());
+
+                // Género / Sexo: SIEMPRE corregir a Hombre / Masculino incluso si un parser de CV preseleccionó Mujer
+                const esSexo = /\b(sexo|sex|género|genero|gender|idsex)\b/.test(lbl) || (
+                    optsTxt.some(t => /\b(hombre|masculino|male|varón|varon)\b/.test(t)) &&
+                    optsTxt.some(t => /\b(mujer|femenino|female)\b/.test(t))
+                );
+                if (esSexo) {
+                    const optH = optsArr.find(o => /\b(hombre|masculino|male|varón|varon)\b/.test(o.text.trim().toLowerCase()));
+                    if (optH && s.value !== optH.value) {
+                        s.value = optH.value;
+                        s.dispatchEvent(new Event('change', {bubbles: true}));
+                        s.dispatchEvent(new Event('input', {bubbles: true}));
+                        cnt++;
+                    }
+                    continue;
+                }
+
+                // Estado civil -> Soltero(a)
+                if (/\b(estado civil|marital|idmaritalstatus)\b/.test(lbl)) {
+                    const optS = optsArr.find(o => o.text.trim().toLowerCase().includes('solter'));
+                    if (optS && s.value !== optS.value) {
+                        s.value = optS.value;
+                        s.dispatchEvent(new Event('change', {bubbles: true}));
+                        s.dispatchEvent(new Event('input', {bubbles: true}));
+                        cnt++;
+                    }
+                    continue;
+                }
+
+                // Hijos -> No
+                if (/\b(hijos|children|idchildren)\b/.test(lbl)) {
+                    const optN = optsArr.find(o => o.text.trim().toLowerCase() === 'no');
+                    if (optN && s.value !== optN.value) {
+                        s.value = optN.value;
+                        s.dispatchEvent(new Event('change', {bubbles: true}));
+                        s.dispatchEvent(new Event('input', {bubbles: true}));
+                        cnt++;
+                    }
+                    continue;
+                }
+
+                const selOpt = s.options[s.selectedIndex];
+                const curTxt = (selOpt ? selOpt.text : '').trim().toLowerCase();
+                const isPlaceholder = !s.value || curTxt.includes('seleccione') || curTxt.includes('select') || curTxt === '--';
+                if (!isPlaceholder) continue;
 
                 let desired = null;
                 if (lbl.includes('país') || lbl.includes('pais') || lbl.includes('country')) desired = 'chile';
@@ -1455,7 +1555,7 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
                 else if (lbl.includes('comuna') || lbl.includes('ciudad') || lbl.includes('city')) desired = 'las condes';
 
                 if (desired) {
-                    const opt = Array.from(s.options).find(o => o.text.toLowerCase().includes(desired) || (desired === 'las condes' && o.text.toLowerCase().includes('santiago')));
+                    const opt = optsArr.find(o => o.text.toLowerCase().includes(desired) || (desired === 'las condes' && o.text.toLowerCase().includes('santiago')));
                     if (opt) {
                         s.value = opt.value;
                         s.dispatchEvent(new Event('change', {bubbles: true}));
@@ -1770,6 +1870,13 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
                 chosen = opts.find(o => o.txt.toLowerCase().includes("duoc"));
             } else if (qtxt.includes("inglés") || qtxt.includes("ingles")) {
                 chosen = opts.find(o => o.txt.toLowerCase().includes("intermedio"));
+            } else if (
+                qtxt.includes("sexo") || qtxt.includes("género") || qtxt.includes("genero") ||
+                opts.some(o => /\b(hombre|masculino|male|varón|varon)\b/i.test(o.txt))
+            ) {
+                chosen = opts.find(o => /\b(hombre|masculino|male|varón|varon)\b/i.test(o.txt));
+            } else if (qtxt.includes("estado civil") || opts.some(o => /solter/i.test(o.txt))) {
+                chosen = opts.find(o => /solter/i.test(o.txt));
             }
 
             if (!chosen) {
@@ -1817,11 +1924,28 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
         const selects = Array.from(document.querySelectorAll('form select, .input-style select, dialog[open] select, select:not([name*="search"]):not([name="idioma"])'));
         for (let sel of selects) {
             if (!sel.offsetParent) continue;
-            if (sel.value && sel.value !== "" && !sel.value.toLowerCase().includes("select")) continue;
-
             const container = sel.closest('.input-style') || sel.closest('.form-group') || sel.parentElement;
-            const txt = container ? container.innerText.toLowerCase() : "";
+            const txt = ((sel.id || '') + ' ' + (sel.name || '') + ' ' + (container ? container.innerText : '')).toLowerCase();
             const options = Array.from(sel.querySelectorAll('option'));
+            const optsTxt = options.map(o => (o.innerText || o.textContent || '').trim().toLowerCase());
+
+            // Sexo / Género SIEMPRE Hombre / Masculino (aunque el sitio preseleccione Mujer)
+            const isSexo = /\b(sexo|sex|género|genero|gender|idsex)\b/.test(txt) || (
+                optsTxt.some(t => /\b(hombre|masculino|male|varón|varon)\b/.test(t)) &&
+                optsTxt.some(t => /\b(mujer|femenino|female)\b/.test(t))
+            );
+            if (isSexo) {
+                const optH = options.find(o => /\b(hombre|masculino|male|varón|varon)\b/.test((o.innerText || o.textContent || '').trim().toLowerCase()));
+                if (optH && sel.value !== optH.value) {
+                    sel.value = optH.value;
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    sel.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                continue;
+            }
+
+            if (sel.value && sel.value !== "" && !sel.value.toLowerCase().includes("select")) continue;
+            if (/\b(deficiency|discapacidad|marital|children|hijos|worktype)\b/.test(txt)) continue;
 
             const isNo = txt.includes("inclusión") || txt.includes("discapacidad") || txt.includes("ajuste razonable");
             let targetOption = null;
@@ -1843,7 +1967,7 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
                 }
             }
 
-            if (!targetOption && options.length > 1) {
+            if (!targetOption && options.length > 1 && options.length <= 4) {
                 for (let opt of options) {
                     if (opt.value && opt.value !== "") {
                         targetOption = opt;
