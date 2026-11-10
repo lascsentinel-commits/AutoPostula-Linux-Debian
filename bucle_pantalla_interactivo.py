@@ -705,7 +705,9 @@ async def gestionar_limite_pestanas(browser, max_tabs: int | None = None, tabs_p
     """Mantiene abiertas como máximo `max_tabs` pestañas laborales (incluyendo portales ATS externos), cerrando las cerradas, completadas, spam comercial o sin postulación en curso."""
     if not browser:
         return 0
-    limite = max(1, int(max_tabs or GLOBAL_BOT_CONTROL.get("max_tabs", 4)))
+    if max_tabs is None:
+        max_tabs = GLOBAL_BOT_CONTROL.get("max_tabs", 4)
+    limite = max(0, int(max_tabs))
     protegidas = tabs_protegidas or set()
     keep_personal = [
         "mis-postulaciones", "campusvirtual.duoc.cl", "localhost:8087",
@@ -2445,6 +2447,7 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
             portal = of["portal"]
 
             print(f"\n>>> [{i}/{total}] Procesando oferta #{of_id}: {empresa} - {titulo} ({portal})")
+            await gestionar_limite_pestanas(browser, max(0, GLOBAL_BOT_CONTROL["max_tabs"] - 1))
             page = await ctx.new_page()
             tabs_oferta = [page]
 
