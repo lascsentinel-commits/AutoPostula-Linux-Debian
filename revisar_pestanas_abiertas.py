@@ -104,6 +104,17 @@ def diagnosticar_bloqueo(url: str, title: str, diag: dict) -> tuple[str, str]:
     return "sin_confirmacion_envio", "Se intentó enviar pero el portal no mostró mensaje explícito de postulación exitosa."
 
 
+async def _cerrar_pestana_seguro(ctx, pg):
+    """Cierra una pestaña sin apagar Brave si es la última abierta (la redirige al panel local)."""
+    try:
+        if len(ctx.pages) <= 1:
+            await pg.goto("http://localhost:8087/", wait_until="domcontentloaded", timeout=8000)
+        else:
+            await pg.close()
+    except Exception:
+        pass
+
+
 async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool = True, con_voz: bool = True):
     bp.GLOBAL_CON_VOZ = con_voz
     resultados = []
@@ -144,10 +155,7 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
             if u_base in vistas_urls:
                 print("♻️  Pestaña duplicada detectada. Cerrando...")
                 resultados.append({"url": url_orig, "titulo": title, "estado": "cerrada_duplicada", "motivo": "Pestaña duplicada de otra ya revisada."})
-                try:
-                    await pg.close()
-                except Exception:
-                    pass
+                await _cerrar_pestana_seguro(ctx, pg)
                 continue
             vistas_urls.add(u_base)
 
@@ -171,10 +179,7 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
                 print("✅ Ya figuraba confirmada en pantalla. Actualizando DB y cerrando...")
                 actualizar_db_por_url(url_orig, "🟢 Postulado Confirmado", "[Auditor pestañas] Confirmación detectada en pantalla")
                 resultados.append({"url": url_orig, "titulo": title, "estado": "ya_confirmada_cerrada", "motivo": "Ya estaba confirmada con éxito en pantalla."})
-                try:
-                    await pg.close()
-                except Exception:
-                    pass
+                await _cerrar_pestana_seguro(ctx, pg)
                 continue
 
             # 2. Cerrada, spam comercial o pestaña intermedia LinkedIn sin modal
@@ -190,10 +195,7 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
                 if cod_pre == "oferta_cerrada":
                     actualizar_db_por_url(url_orig, "🔴 Oferta Cerrada / Expirada", msg_pre)
                 resultados.append({"url": url_orig, "titulo": title, "estado": "no_postulable_cerrada", "codigo": cod_pre, "motivo": msg_pre})
-                try:
-                    await pg.close()
-                except Exception:
-                    pass
+                await _cerrar_pestana_seguro(ctx, pg)
                 continue
 
             # 3. Intentar completar formulario o pulsar CTA inicial ('Postularme' / 'Postular' / 'Solicitar')
@@ -247,10 +249,7 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
                 cod, mot = diagnosticar_bloqueo(active_pg.url, title, diag_mid)
                 print(f"❌ No postulable ({cod}): {mot} -> Cerrando pestaña.")
                 resultados.append({"url": active_pg.url, "titulo": title, "estado": "no_postulable_cerrada", "codigo": cod, "motivo": mot})
-                try:
-                    await active_pg.close()
-                except Exception:
-                    pass
+                await _cerrar_pestana_seguro(ctx, active_pg)
                 continue
 
             # Rellenar datos personales/CV y preguntas de la oferta
@@ -288,10 +287,7 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
                 cod, mot = diagnosticar_bloqueo(active_pg.url, title, {**diag_mid, "body_low": bt_end})
                 print(f"⚠️ No confirmó envío ({cod}): {mot} -> Cerrando pestaña.")
                 resultados.append({"url": active_pg.url, "titulo": title, "estado": "no_postulable_cerrada", "codigo": cod, "motivo": mot})
-                try:
-                    await active_pg.close()
-                except Exception:
-                    pass
+                await _cerrar_pestana_seguro(ctx, active_pg)
 
         # Dejar abiertas como máximo las últimas `max_mantener` (4) pestañas a las que postuló
         if len(postuladas_ok) > max_mantener:
