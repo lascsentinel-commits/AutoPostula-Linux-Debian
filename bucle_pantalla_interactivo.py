@@ -158,7 +158,7 @@ def es_region_metropolitana(ubicacion: str, titulo: str, descripcion: str = "") 
     return False
 
 
-def obtener_ofertas_validas_pendientes(limite: int = 100, solo_id: int = None):
+def obtener_ofertas_validas_pendientes(limite: int = 100, solo_id: int = None, solo_portal: str | None = None):
     """Filtra y devuelve estrictamente ofertas de práctica técnica en la Región Metropolitana (priorizando las más recientes)."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -170,10 +170,12 @@ def obtener_ofertas_validas_pendientes(limite: int = 100, solo_id: int = None):
         conn.close()
         return rows
 
-    query = """
+    filtro_portal_sql = "AND LOWER(portal) LIKE ?" if solo_portal else ""
+    query = f"""
     SELECT *
     FROM postulaciones
     WHERE (estado LIKE '%Cola%' OR estado LIKE '%Lista%')
+      {filtro_portal_sql}
       AND (
            LOWER(titulo) LIKE '%práctica%'
            OR LOWER(titulo) LIKE '%practica%'
@@ -214,7 +216,10 @@ def obtener_ofertas_validas_pendientes(limite: int = 100, solo_id: int = None):
       )
     ORDER BY (CASE WHEN created_at >= date('now', '-5 days') THEN 1 ELSE 0 END) DESC, score_duoc DESC, id DESC;
     """
-    c.execute(query)
+    if solo_portal:
+        c.execute(query, (f"%{solo_portal.lower()}%",))
+    else:
+        c.execute(query)
     candidatas = [dict(r) for r in c.fetchall()]
     conn.close()
 
@@ -1372,7 +1377,7 @@ async def manejar_autenticacion_portal(page, empresa: str = "", solo_auto: bool 
 
     # En Workday, esperar brevemente a que React monte los botones de SSO o el input de archivo
     if "myworkdayjobs.com" in u_low and "/apply" in u_low:
-        for _ in range(8):
+        for _ in range(12):
             try:
                 listo = await page.locator(
                     "button[data-automation-id='GoogleSignInButton'], button[data-automation-id='SignInWithEmailButton'], input[type='file'], input[data-automation-id='email']"
@@ -2898,18 +2903,22 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         return "revision", f"Revisar estado en {portal} (no se detectó confirmación explícita tras envío)"
 
 
-async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, solo_id: int = None):
-    ofertas = obtener_ofertas_validas_pendientes(limite=max_ofertas, solo_id=solo_id)
+async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, solo_id: int = None, solo_portal: str | None = None):
+    ofertas = obtener_ofertas_validas_pendientes(limite=max_ofertas, solo_id=solo_id, solo_portal=solo_portal)
     total = len(ofertas)
 
     if total == 0:
-        print("✅ No hay ofertas de práctica técnica pendientes en la Región Metropolitana.")
-        hablar("No hay más ofertas pendientes en la Región Metropolitana.", final=True)
+        msg_empty = f"No hay más ofertas pendientes en {solo_portal}." if solo_portal else "No hay más ofertas pendientes en la Región Metropolitana."
+        print(f"✅ {msg_empty}")
+        hablar(msg_empty, final=True)
         return
 
     print("==========================================================")
     print(f"🚀 INICIANDO BUCLE DE POSTULACIÓN EN PANTALLA (REGIÓN METROPOLITANA)")
+    if solo_portal:
+        print(f"🎯 Portal filtrado: {solo_portal}")
     print(f"📋 Total ofertas técnicas RM en cola: {total}")
+    print(f"🗂️  Máx. pestañas laborales simultáneas: {GLOBAL_BOT_CONTROL['max_tabs']}")
     print(f"⏱️  Pausa de revisión tras lectura: {segundos_revision} segundos")
     print(f"🔘 Botón flotante interactivo: Esquina inferior izquierda (Pausar/Reanudar)")
     print(f"🖥️  Navegador: Brave Browser en puerto 9222 (CDP)")
@@ -3059,13 +3068,17 @@ if __name__ == "__main__":
     parser.add_argument("--segundos", type=int, default=30, help="Segundos de revisión tras leer las respuestas (ej. 30 a 60, o 0 para envío inmediato)")
     parser.add_argument("--max", type=int, default=100, help="Máximo de ofertas a procesar en el bucle")
     parser.add_argument("--id", type=int, default=None, help="Procesar una sola oferta específica por su ID")
+    parser.add_argument("--portal", type=str, default=None, help="Filtrar solo ofertas de un portal específico (ej. Computrabajo, DuocLaboral, LinkedIn Jobs)")
+    parser.add_argument("--max-tabs", type=int, default=None, help="Máximo inicial de pestañas laborales abiertas simultáneamente (ej. 1)")
     parser.add_argument("--no-focus", action="store_true", help="No enfocar la ventana de Brave (modo silencioso / segundo plano)")
     parser.add_argument("--sin-voz", action="store_true", help="No narrar con Di por voz")
     args = parser.parse_args()
 
+    if args.max_tabs is not None:
+        GLOBAL_BOT_CONTROL["max_tabs"] = max(1, min(15, args.max_tabs))
     if args.no_focus:
         GLOBAL_ENFOCAR = False
     if args.sin_voz:
         GLOBAL_CON_VOZ = False
 
-    asyncio.run(ejecutar_bucle(segundos_revision=args.segundos, max_ofertas=args.max, solo_id=args.id))
+    asyncio.run(ejecutar_bucle(segundos_revision=args.segundos, max_ofertas=args.max, solo_id=args.id, solo_portal=args.portal))
