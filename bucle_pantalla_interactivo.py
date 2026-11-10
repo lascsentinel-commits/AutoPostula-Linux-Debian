@@ -333,6 +333,12 @@ GLOBAL_BOT_CONTROL = {
 
 _WIDGET_JS = """
 (() => {
+    const WIDGET_VER = '4.2';
+    window.__autopostula_widget_version = WIDGET_VER;
+    if (window.__autopostula_interval && window.__autopostula_interval_ver !== WIDGET_VER) {
+        clearInterval(window.__autopostula_interval);
+        window.__autopostula_interval = null;
+    }
     window.__autopostula_paused = window.__autopostula_paused || false;
     window.__autopostula_stop = window.__autopostula_stop || false;
     window.__autopostula_skip_wait = false;
@@ -420,11 +426,13 @@ _WIDGET_JS = """
         if (!targetParent) return;
 
         let root = document.getElementById('autopostula-root-container');
-        if (!root || root.parentElement !== targetParent) {
+        const esViejo = root && root.getAttribute('data-ap-ver') !== WIDGET_VER;
+        if (!root || root.parentElement !== targetParent || esViejo) {
             if (root && root.remove) root.remove();
 
             root = document.createElement('div');
             root.id = 'autopostula-root-container';
+            root.setAttribute('data-ap-ver', WIDGET_VER);
             root.style.cssText = `
                 position: fixed !important;
                 bottom: 28px !important;
@@ -673,6 +681,7 @@ _WIDGET_JS = """
     createOrAttachWidget();
 
     if (!window.__autopostula_interval) {
+        window.__autopostula_interval_ver = WIDGET_VER;
         window.__autopostula_interval = setInterval(createOrAttachWidget, 600);
     }
 })();
@@ -815,7 +824,14 @@ async def sincronizar_widgets_navegador(browser):
             res = await pg.evaluate('''() => {
                 const cmd = window.__autopostula_pending_cmd || null;
                 window.__autopostula_pending_cmd = null;
-                return { ready: typeof window.__autopostula_sync_state === 'function', cmd };
+                return {
+                    ready: (
+                        typeof window.__autopostula_sync_state === 'function' &&
+                        window.__autopostula_widget_version === '4.2' &&
+                        !!document.getElementById('autopostula-modal-autodesc')
+                    ),
+                    cmd
+                };
             }''')
             if not res.get("ready"):
                 await pg.evaluate(_WIDGET_JS)
