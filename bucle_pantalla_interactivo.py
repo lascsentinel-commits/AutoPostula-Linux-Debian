@@ -304,6 +304,8 @@ def es_url_catalogo(url: str, portal: str = "") -> bool:
 
 
 FRASES_CERRADA = [
+    "ya no se aceptan solicitudes", "no longer accepting applications", "no se aceptan más solicitudes",
+    "solicitudes cerradas", "no admite más solicitudes",
     "oferta finalizada", "oferta cerrada", "proceso finalizado", "ya no está disponible",
     "aviso finalizado", "404", "ha cerrado su proceso", "ya ha cerrado", "cerrado su proceso",
     "proceso de postulación cerrado", "este aviso ha expirado", "la publicación ha finalizado",
@@ -320,6 +322,13 @@ GLOBAL_BOT_CONTROL = {
     "segundos": 30,
     "timer_text": "30s",
     "last_cmd_ts": 0,
+    "panel_open": False,
+    "leer_descripcion": False,
+    "max_tabs": 4,
+    "read_desc_now": False,
+    "clean_tabs_now": False,
+    "desc_actual": "",
+    "empresa_actual": "",
 }
 
 _WIDGET_JS = """
@@ -330,6 +339,9 @@ _WIDGET_JS = """
     window.__autopostula_timer_text = window.__autopostula_timer_text || "30s";
     window.__autopostula_segundos_revision = window.__autopostula_segundos_revision || 30;
     window.__autopostula_panel_open = window.__autopostula_panel_open !== undefined ? window.__autopostula_panel_open : false;
+    window.__autopostula_leer_desc = window.__autopostula_leer_desc !== undefined ? window.__autopostula_leer_desc : false;
+    window.__autopostula_max_tabs = window.__autopostula_max_tabs || 4;
+    window.__autopostula_hovering = false;
 
     function pushCmd(action, value = null) {
         window.__autopostula_pending_cmd = { action, value, ts: Date.now() };
@@ -346,6 +358,16 @@ _WIDGET_JS = """
 
         const modalToggleBtn = document.getElementById('autopostula-modal-toggle');
         const modalTimer = document.getElementById('autopostula-modal-timer');
+        const autoDescBtn = document.getElementById('autopostula-modal-autodesc');
+        const maxTabsVal = document.getElementById('autopostula-max-tabs-val');
+
+        if (maxTabsVal) maxTabsVal.innerText = String(window.__autopostula_max_tabs || 4);
+        if (autoDescBtn) {
+            const on = !!window.__autopostula_leer_desc;
+            autoDescBtn.innerText = on ? '🔊 Lectura Auto Descripción (Edge-TTS): ON' : '🔇 Lectura Auto Descripción (Edge-TTS): OFF';
+            autoDescBtn.style.background = on ? '#0ea5e9' : 'rgba(255,255,255,0.10)';
+            autoDescBtn.style.borderColor = on ? '#38bdf8' : 'rgba(255,255,255,0.22)';
+        }
 
         if (window.__autopostula_stop) {
             pill.style.borderColor = '#ef4444';
@@ -399,13 +421,13 @@ _WIDGET_JS = """
             root.id = 'autopostula-root-container';
             root.style.cssText = `
                 position: fixed !important;
-                bottom: 35px !important;
-                left: 35px !important;
+                bottom: 28px !important;
+                left: 28px !important;
                 z-index: 2147483647 !important;
                 display: flex !important;
                 flex-direction: column !important;
                 align-items: flex-start !important;
-                gap: 12px !important;
+                gap: 10px !important;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
                 user-select: none !important;
             `;
@@ -415,52 +437,74 @@ _WIDGET_JS = """
             modal.style.cssText = `
                 display: ${window.__autopostula_panel_open ? 'flex' : 'none'} !important;
                 flex-direction: column !important;
-                gap: 12px !important;
-                width: 320px !important;
+                gap: 9px !important;
+                width: 335px !important;
                 background: rgba(13, 17, 28, 0.98) !important;
                 border: 2px solid #38bdf8 !important;
                 box-shadow: 0 10px 40px rgba(0, 0, 0, 0.9), 0 0 30px rgba(56, 189, 248, 0.4) !important;
                 border-radius: 16px !important;
-                padding: 16px !important;
+                padding: 14px !important;
                 color: #ffffff !important;
                 backdrop-filter: blur(20px) !important;
             `;
 
             modal.innerHTML = `
-                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.15); padding-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.15); padding-bottom:7px;">
                     <div style="font-size:14px; font-weight:800; color:#38bdf8; display:flex; align-items:center; gap:6px;">
                         <span>⚙️ Panel AutoPostula</span>
                     </div>
                     <button id="autopostula-modal-close-window" style="background:transparent; border:none; color:#94a3b8; font-size:16px; font-weight:bold; cursor:pointer;">✕</button>
                 </div>
 
-                <div id="autopostula-modal-timer" style="font-size:13px; font-weight:700; color:#cbd5e1; text-align:center; padding:4px 0;">
+                <div id="autopostula-modal-timer" style="font-size:13px; font-weight:700; color:#cbd5e1; text-align:center; padding:2px 0;">
                     ${window.__autopostula_timer_text} restantes
                 </div>
 
-                <button id="autopostula-modal-toggle" style="background:#0284c7; border:none; border-radius:10px; color:#ffffff; font-size:14px; font-weight:800; padding:10px; cursor:pointer; transition:all 0.15s ease;">
+                <button id="autopostula-modal-toggle" style="background:#0284c7; border:none; border-radius:10px; color:#ffffff; font-size:14px; font-weight:800; padding:9px; cursor:pointer; transition:all 0.15s ease;">
                     ${window.__autopostula_paused ? '▶️ REANUDAR BOT' : '⏸️ PAUSAR BOT'}
                 </button>
 
-                <div style="display:flex; flex-direction:column; gap:6px;">
-                    <span style="font-size:12px; font-weight:700; color:#94a3b8;">⏱️ Tiempo de espera antes de enviar:</span>
+                <div style="display:flex; flex-direction:column; gap:5px;">
+                    <span style="font-size:11px; font-weight:700; color:#94a3b8;">⏱️ Tiempo de espera antes de enviar:</span>
                     <div style="display:flex; gap:6px; justify-content:space-between;">
-                        <button class="autopostula-time-preset" data-seconds="15" style="flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:8px; color:#fff; font-size:12px; font-weight:700; padding:5px 0; cursor:pointer;">15s</button>
-                        <button class="autopostula-time-preset" data-seconds="30" style="flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:8px; color:#fff; font-size:12px; font-weight:700; padding:5px 0; cursor:pointer;">30s</button>
-                        <button class="autopostula-time-preset" data-seconds="60" style="flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:8px; color:#fff; font-size:12px; font-weight:700; padding:5px 0; cursor:pointer;">60s</button>
-                        <button class="autopostula-time-preset" data-seconds="120" style="flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:8px; color:#fff; font-size:12px; font-weight:700; padding:5px 0; cursor:pointer;">2m</button>
+                        <button class="autopostula-time-preset" data-seconds="15" style="flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:8px; color:#fff; font-size:12px; font-weight:700; padding:4px 0; cursor:pointer;">15s</button>
+                        <button class="autopostula-time-preset" data-seconds="30" style="flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:8px; color:#fff; font-size:12px; font-weight:700; padding:4px 0; cursor:pointer;">30s</button>
+                        <button class="autopostula-time-preset" data-seconds="60" style="flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:8px; color:#fff; font-size:12px; font-weight:700; padding:4px 0; cursor:pointer;">60s</button>
+                        <button class="autopostula-time-preset" data-seconds="120" style="flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); border-radius:8px; color:#fff; font-size:12px; font-weight:700; padding:4px 0; cursor:pointer;">2m</button>
                     </div>
                 </div>
 
-                <button id="autopostula-modal-skip" style="background:#10b981; border:none; border-radius:10px; color:#ffffff; font-size:13px; font-weight:800; padding:9px; cursor:pointer;">
+                <div style="display:flex; flex-direction:column; gap:5px; background:rgba(255,255,255,0.04); padding:8px; border-radius:10px; border:1px solid rgba(255,255,255,0.12);">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-size:11px; font-weight:700; color:#cbd5e1;">🗂️ Máx. pestañas laborales:</span>
+                        <div style="display:flex; align-items:center; gap:6px;">
+                            <button id="autopostula-tabs-dec" style="background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.25); color:#fff; width:24px; height:24px; border-radius:6px; font-weight:800; cursor:pointer;">-</button>
+                            <span id="autopostula-max-tabs-val" style="font-size:13px; font-weight:900; color:#38bdf8; min-width:18px; text-align:center;">${window.__autopostula_max_tabs}</span>
+                            <button id="autopostula-tabs-inc" style="background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.25); color:#fff; width:24px; height:24px; border-radius:6px; font-weight:800; cursor:pointer;">+</button>
+                        </div>
+                    </div>
+                    <button id="autopostula-modal-cleantabs" style="background:rgba(245,158,11,0.18); border:1px solid rgba(245,158,11,0.45); border-radius:8px; color:#fbbf24; font-size:11px; font-weight:800; padding:5px; cursor:pointer;">
+                        🧹 Cerrar pestañas sin proceso ahora
+                    </button>
+                </div>
+
+                <button id="autopostula-modal-autodesc" style="background:rgba(255,255,255,0.10); border:1px solid rgba(255,255,255,0.22); border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:7px; cursor:pointer;">
+                    🔇 Lectura Auto Descripción (Edge-TTS): OFF
+                </button>
+
+                <button id="autopostula-modal-readdesc" style="background:#0f766e; border:none; border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:8px; cursor:pointer;">
+                    📖 Leer Descripción Ahora (Edge-TTS)
+                </button>
+
+                <button id="autopostula-modal-skip" style="background:#10b981; border:none; border-radius:10px; color:#ffffff; font-size:13px; font-weight:800; padding:8px; cursor:pointer;">
                     🚀 Enviar Postulación Ahora
                 </button>
 
-                <button id="autopostula-modal-memory" style="background:#6366f1; border:none; border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:8px; cursor:pointer;">
+                <button id="autopostula-modal-memory" style="background:#6366f1; border:none; border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:7px; cursor:pointer;">
                     🧠 Ver / Editar Memoria (Q&A)
                 </button>
 
-                <button id="autopostula-modal-stop-bot" style="background:transparent; border:1px solid #ef4444; border-radius:10px; color:#ef4444; font-size:12px; font-weight:700; padding:7px; cursor:pointer;">
+                <button id="autopostula-modal-stop-bot" style="background:transparent; border:1px solid #ef4444; border-radius:10px; color:#ef4444; font-size:12px; font-weight:700; padding:6px; cursor:pointer;">
                     🛑 Detener Bot por Completo
                 </button>
             `;
@@ -491,9 +535,26 @@ _WIDGET_JS = """
                 <span style="font-size:14px; opacity:0.8; margin-left:4px;">⚙️</span>
             `;
 
+            let leaveTimer = null;
+            root.addEventListener('mouseenter', () => {
+                window.__autopostula_hovering = true;
+                if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
+            });
+            root.addEventListener('mouseleave', () => {
+                window.__autopostula_hovering = false;
+                if (window.__autopostula_panel_open) {
+                    leaveTimer = setTimeout(() => {
+                        window.__autopostula_panel_open = false;
+                        pushCmd('set_panel_open', false);
+                        updateWidgetState();
+                    }, 220);
+                }
+            });
+
             pill.addEventListener('click', (e) => {
                 e.stopPropagation();
                 window.__autopostula_panel_open = !window.__autopostula_panel_open;
+                pushCmd('set_panel_open', window.__autopostula_panel_open);
                 updateWidgetState();
             });
 
@@ -504,6 +565,7 @@ _WIDGET_JS = """
             modal.querySelector('#autopostula-modal-close-window')?.addEventListener('click', (e) => {
                 e.stopPropagation();
                 window.__autopostula_panel_open = false;
+                pushCmd('set_panel_open', false);
                 updateWidgetState();
             });
 
@@ -512,6 +574,39 @@ _WIDGET_JS = """
                 window.__autopostula_paused = !window.__autopostula_paused;
                 pushCmd('toggle_pause', window.__autopostula_paused);
                 updateWidgetState();
+            });
+
+            modal.querySelector('#autopostula-tabs-dec')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const nv = Math.max(1, (window.__autopostula_max_tabs || 4) - 1);
+                window.__autopostula_max_tabs = nv;
+                pushCmd('set_max_tabs', nv);
+                updateWidgetState();
+            });
+
+            modal.querySelector('#autopostula-tabs-inc')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const nv = Math.min(15, (window.__autopostula_max_tabs || 4) + 1);
+                window.__autopostula_max_tabs = nv;
+                pushCmd('set_max_tabs', nv);
+                updateWidgetState();
+            });
+
+            modal.querySelector('#autopostula-modal-cleantabs')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                pushCmd('clean_tabs_now', true);
+            });
+
+            modal.querySelector('#autopostula-modal-autodesc')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                window.__autopostula_leer_desc = !window.__autopostula_leer_desc;
+                pushCmd('toggle_autodesc', window.__autopostula_leer_desc);
+                updateWidgetState();
+            });
+
+            modal.querySelector('#autopostula-modal-readdesc')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                pushCmd('read_desc_now', true);
             });
 
             modal.querySelector('#autopostula-modal-skip')?.addEventListener('click', (e) => {
@@ -561,19 +656,116 @@ _WIDGET_JS = """
         window.__autopostula_stop = !!st.stop;
         window.__autopostula_timer_text = st.timer_text || '30s';
         window.__autopostula_segundos_revision = st.segundos || 30;
+        window.__autopostula_leer_desc = !!st.leer_descripcion;
+        window.__autopostula_max_tabs = st.max_tabs || 4;
+        if (typeof st.panel_open === 'boolean' && !window.__autopostula_hovering) {
+            window.__autopostula_panel_open = st.panel_open;
+        }
         createOrAttachWidget();
     };
     createOrAttachWidget();
 
     if (!window.__autopostula_interval) {
-        window.__autopostula_interval = setInterval(createOrAttachWidget, 500);
+        window.__autopostula_interval = setInterval(createOrAttachWidget, 600);
     }
 })();
 """
 
 
+def es_pagina_comercial_no_laboral(url: str, body_text: str) -> bool:
+    """Detecta si una URL o página abierta corresponde a marketing/ventas/servicios (ej. LinkedIn Service Marketplace) en vez de postulación laboral."""
+    u = (url or "").lower()
+    if any(k in u for k in ["service-marketplace", "careercoaching", "/checkout", "/cart", "/pricing", "/subscribe", "premium/products", "/courses/"]):
+        return True
+    bt = (body_text or "").lower()
+    if any(k in bt for k in ["linkedIn service marketplace".lower(), "elige un plan de coaching", "contratar un coach", "añadir al carrito", "comprar ahora", "método de pago"]):
+        tiene_job = any(j in bt for j in ["currículum", "curriculum", "cv", "postular", "solicitud enviada", "vacante", "práctica profesional"])
+        if not tiene_job:
+            return True
+    return False
+
+
+async def gestionar_limite_pestanas(browser, max_tabs: int | None = None, tabs_protegidas: set | None = None) -> int:
+    """Mantiene abiertas como máximo `max_tabs` pestañas laborales, cerrando las cerradas, completadas, spam comercial o sin postulación en curso."""
+    if not browser:
+        return 0
+    limite = max(1, int(max_tabs or GLOBAL_BOT_CONTROL.get("max_tabs", 4)))
+    protegidas = tabs_protegidas or set()
+    job_domains = [
+        "linkedin.com/jobs", "linkedin.com/service-marketplace", "trabajando.cl/trabajo",
+        "firstjob.me/oferta", "laborum.cl/empleos", "computrabajo.cl/ofertas",
+        "chiletrabajos.cl/trabajo", "duoclaboral.cl/trabajar", "csod.com",
+        "pandape.computrabajo", "aira", "buk", "accenture.com/cl-es/careers"
+    ]
+    keep_personal = ["mis-postulaciones", "campusvirtual.duoc.cl", "localhost:8087", "/postulantes/curriculum", "linkedin.com/in/"]
+
+    evaluadas = []
+    for ctx in list(browser.contexts):
+        for pg in list(ctx.pages):
+            u = (pg.url or "").lower()
+            if not u.startswith("http") or any(k in u for k in keep_personal):
+                continue
+            if not any(d in u for d in job_domains):
+                continue
+            try:
+                info = await pg.evaluate(r'''() => {
+                    const bt = (document.body?.innerText || '').toLowerCase();
+                    const hasModalForm = document.querySelectorAll('dialog[open], #form-postulation-questions textarea, form#formularioPreguntasOferta textarea, .jobs-easy-apply-modal').length > 0;
+                    const typed = Array.from(document.querySelectorAll('textarea, input[type="text"]:not([id*="search"]):not([id*="react-select"]):not([id*="select-footer"])')).filter(e => e.offsetParent !== null && (e.value || '').trim().length > 2).length;
+                    const closed = bt.includes('ya no se aceptan solicitudes') || bt.includes('no longer accepting applications') || bt.includes('oferta cerrada') || bt.includes('ya no está disponible');
+                    const done = bt.includes('solicitud enviada') || bt.includes('postulación enviada') || bt.includes('ha presentado solicitud exitosamente') || bt.includes('postulación exitosa') || bt.includes('solicitud completada') || Array.from(document.querySelectorAll('button, a')).some(e => (e.innerText || '').includes('Ver estadísticas'));
+                    return { hasModalForm, typed, closed, done };
+                }''')
+            except Exception:
+                info = {"hasModalForm": False, "typed": 0, "closed": False, "done": False}
+
+            spam = es_pagina_comercial_no_laboral(u, "")
+            en_proceso = (pg in protegidas) or info.get("hasModalForm") or (info.get("typed", 0) > 0 and not info.get("done"))
+            evaluadas.append({
+                "pg": pg,
+                "url": u.split("?")[0],
+                "en_proceso": en_proceso,
+                "cerrable_inmediata": spam or info.get("closed") or info.get("done"),
+            })
+
+    cerradas = 0
+    vistos_urls = set()
+    restantes = []
+
+    # 1. Cerrar de inmediato spam comercial, ofertas cerradas/completadas y duplicadas sin proceso activo
+    for item in evaluadas:
+        pg = item["pg"]
+        u_base = item["url"]
+        es_dup = (u_base in vistos_urls) and not item["en_proceso"]
+        vistos_urls.add(u_base)
+        if pg not in protegidas and (item["cerrable_inmediata"] or es_dup):
+            try:
+                await pg.close()
+                cerradas += 1
+            except Exception:
+                restantes.append(item)
+        else:
+            restantes.append(item)
+
+    # 2. Si aún superan el límite `max_tabs`, cerrar las pestañas más antiguas que NO tienen postulación en proceso
+    while len(restantes) > limite:
+        candidato = next((x for x in restantes if not x["en_proceso"] and x["pg"] not in protegidas), None)
+        if not candidato:
+            break
+        restantes.remove(candidato)
+        try:
+            await candidato["pg"].close()
+            cerradas += 1
+        except Exception:
+            pass
+
+    if cerradas > 0:
+        print(f"🧹 Limpieza automática: se cerraron {cerradas} pestañas laborales cerradas/completadas/sin proceso (límite={limite}).")
+    return cerradas
+
+
 async def sincronizar_widgets_navegador(browser):
-    """Mantiene visible el panel flotante en TODAS las pestañas/ventanas HTTP activas y sincroniza pausar/reanudar/detener."""
+    """Mantiene visible el panel flotante en TODAS las pestañas/ventanas HTTP activas y sincroniza pausar/reanudar/detener/lectura/límite."""
     if not browser:
         return
     paginas = []
@@ -615,12 +807,42 @@ async def sincronizar_widgets_navegador(browser):
             GLOBAL_BOT_CONTROL["skip_wait"] = True
         elif act == "set_seconds" and cmd.get("value"):
             GLOBAL_BOT_CONTROL["segundos"] = int(cmd["value"])
+        elif act == "set_panel_open":
+            GLOBAL_BOT_CONTROL["panel_open"] = bool(cmd.get("value"))
+        elif act == "toggle_autodesc":
+            GLOBAL_BOT_CONTROL["leer_descripcion"] = bool(cmd.get("value"))
+            estado_txt = "activada" if GLOBAL_BOT_CONTROL["leer_descripcion"] else "desactivada"
+            hablar(f"Lectura automática de descripciones {estado_txt}.")
+        elif act == "read_desc_now":
+            GLOBAL_BOT_CONTROL["read_desc_now"] = True
+        elif act == "set_max_tabs" and cmd.get("value"):
+            GLOBAL_BOT_CONTROL["max_tabs"] = max(1, min(15, int(cmd["value"])))
+            GLOBAL_BOT_CONTROL["clean_tabs_now"] = True
+        elif act == "clean_tabs_now":
+            GLOBAL_BOT_CONTROL["clean_tabs_now"] = True
+
+    if GLOBAL_BOT_CONTROL["read_desc_now"]:
+        GLOBAL_BOT_CONTROL["read_desc_now"] = False
+        desc_txt = (GLOBAL_BOT_CONTROL.get("desc_actual") or "").strip()
+        emp_txt = GLOBAL_BOT_CONTROL.get("empresa_actual") or "esta oferta"
+        if desc_txt:
+            fragmento = re.sub(r'\s+', ' ', desc_txt)[:850]
+            hablar(f"Descripción completa de {emp_txt}: {fragmento}")
+        else:
+            hablar("Aún no hay una descripción capturada en la oferta actual.")
+
+    if GLOBAL_BOT_CONTROL["clean_tabs_now"]:
+        GLOBAL_BOT_CONTROL["clean_tabs_now"] = False
+        await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"])
 
     payload = {
         "paused": GLOBAL_BOT_CONTROL["paused"],
         "stop": GLOBAL_BOT_CONTROL["stop"],
         "timer_text": GLOBAL_BOT_CONTROL["timer_text"],
         "segundos": GLOBAL_BOT_CONTROL["segundos"],
+        "panel_open": GLOBAL_BOT_CONTROL["panel_open"],
+        "leer_descripcion": GLOBAL_BOT_CONTROL["leer_descripcion"],
+        "max_tabs": GLOBAL_BOT_CONTROL["max_tabs"],
     }
 
     async def _push_pg(pg):
@@ -743,9 +965,15 @@ async def pulsar_primer_postula(page) -> bool:
         for loc in locs:
             try:
                 if await loc.is_visible():
-                    # Evitar falsos positivos en tarjetas de empleos recomendados en LinkedIn
-                    en_card = await loc.evaluate("el => !!el.closest('.job-card-container, .jobs-similar-jobs')")
-                    if en_card:
+                    # Evitar falsos positivos en tarjetas recomendadas, promociones o marketplace comercial
+                    es_invalido = await loc.evaluate('''el => {
+                        if (el.closest('.job-card-container, .jobs-similar-jobs, aside, footer, #autopostula-root-container')) return true;
+                        const href = (el.getAttribute('href') || '').toLowerCase();
+                        const txt = (el.innerText || '').toLowerCase();
+                        const bad = ['service-marketplace', 'careercoaching', 'premium', 'learning', 'pricing', 'checkout', 'curso', 'coaching', 'comprar', 'salarios'];
+                        return bad.some(b => href.includes(b) || txt.includes(b));
+                    }''')
+                    if es_invalido:
                         continue
                     await loc.scroll_into_view_if_needed()
                     try:
@@ -758,7 +986,9 @@ async def pulsar_primer_postula(page) -> bool:
 
     return await page.evaluate('''() => {
         const btns = Array.from(document.querySelectorAll('button, a.btn, a')).filter(el => {
-            if (el.closest('.job-card-container, .jobs-similar-jobs')) return false;
+            if (el.closest('.job-card-container, .jobs-similar-jobs, aside, footer, #autopostula-root-container')) return false;
+            const href = (el.getAttribute('href') || '').toLowerCase();
+            if (['service-marketplace', 'careercoaching', 'premium', 'learning', 'pricing', 'checkout'].some(b => href.includes(b))) return false;
             const txt = (el.innerText || el.textContent || "").trim().toLowerCase();
             const aria = (el.getAttribute('aria-label') || "").toLowerCase();
             return (
@@ -1721,8 +1951,14 @@ async def leer_y_validar_descripcion_oferta(page, oferta: dict) -> tuple[bool, s
         return False, desc_extraida, motivo
 
     resumen_pilares = ", ".join(pilares[:3]) if pilares else "TI / Sistemas"
+    GLOBAL_BOT_CONTROL["desc_actual"] = desc_extraida
+    GLOBAL_BOT_CONTROL["empresa_actual"] = empresa
     print(f"📖 Descripción leída ({len(desc_extraida)} chars) | Válida ✅ | Pilares: {resumen_pilares}")
-    hablar(f"Leí la descripción completa de {empresa}: es una oferta válida orientada a {resumen_pilares}.")
+    if GLOBAL_BOT_CONTROL.get("leer_descripcion") and desc_extraida:
+        frag = re.sub(r'\s+', ' ', desc_extraida)[:700]
+        hablar(f"Descripción de {empresa}: {frag}")
+    else:
+        hablar(f"Leí la descripción completa de {empresa}: oferta válida orientada a {resumen_pilares}.")
     return True, desc_extraida, f"Válida ({resumen_pilares})"
 
 
@@ -1811,8 +2047,11 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         print(f"⚠️  El clic inicial redirigió al catálogo general ({page.url}). Oferta cerrada.")
         return "cerrada", "El botón redirigió al catálogo general de ofertas"
 
-    # Comprobar si tras el clic inicial el portal indica que ya estás postulado o cerrada
+    # Comprobar si tras el clic inicial el portal indica que ya estás postulado, cerrada o redirigió a publicidad/venta
     body_tras_clic = (await page.inner_text("body") or "").lower()
+    if es_pagina_comercial_no_laboral(page.url, body_tras_clic):
+        print(f"⚠️  Se detectó redirección comercial o no laboral ({page.url[:70]}). Cerrando sin postular.")
+        return "cerrada", "Redirigió a página comercial / publicidad (no es oferta laboral)"
     if any(w in body_tras_clic for w in ["ya te postulaste", "ya te has postulado", "ya has postulado", "ya estás postulado", "ya postulaste", "postulación enviada"]):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras clic inicial)"
 
@@ -2142,6 +2381,12 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
         try:
             browser = await p.chromium.connect_over_cdp("http://localhost:9222")
             ctx = browser.contexts[0]
+            try:
+                await ctx.add_init_script(_WIDGET_JS)
+            except Exception:
+                pass
+            await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"])
+            await sincronizar_widgets_navegador(browser)
         except Exception as e:
             print(f"❌ Error conectando a Brave: {e}")
             hablar("Error conectando con Brave en puerto 9222.", final=True)
@@ -2224,6 +2469,7 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                 # NO cerrar ninguna pestaña de la oferta sin confirmación de éxito
 
             conn.close()
+            await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas=set(tabs_oferta) if res_tipo not in ["ok", "ya_postulado", "cerrada", "descartada_desc"] else None)
             await asyncio.sleep(2.0)
 
     await desactivar_widgets_navegador(browser)
