@@ -1334,11 +1334,11 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
             const opts = inputs.map(inp => ({ inp, ...getOptText(inp) }));
             let chosen = null;
 
-            const isNoExpected = qtxt.includes("inclusi") || qtxt.includes("ley 21.015") || qtxt.includes("ajuste razonable") || qtxt.includes("discapacidad") || qtxt.includes("vacaciones programadas");
+            const isNoExpected = qtxt.includes("inclusi") || qtxt.includes("ley 21.015") || qtxt.includes("ajuste razonable") || qtxt.includes("discapacidad") || qtxt.includes("vacaciones programadas") || qtxt.includes("6 meses") || qtxt.includes("seis meses") || qtxt.includes("mínimo de 6") || qtxt.includes("minimo de 6");
 
             if (qtxt.includes("carrera") || qtxt.includes("título") || qtxt.includes("profesión")) {
                 const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-                const prefs = ["infraestructura", "ingenieria en inform", "informatica", "computacion", "otras"];
+                const prefs = ["infraestructura", "plataformas tecnol", "otras", "otra"];
                 for (const p of prefs) {
                     chosen = opts.find(o => norm(o.txt).includes(p));
                     if (chosen) break;
@@ -1842,7 +1842,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             "postulación enviada", "tu candidatura", "inscrita", "ya te has postulado",
             "en proceso", "postular de nuevo", "ya has postulado", "ya estás postulado",
             "solicitud enviada", "envió tu solicitud", "tu solicitud se envió", "application was sent",
-            "postulación completada", "candidatura enviada",
+            "postulación completada", "candidatura enviada", "ha presentado solicitud", "exitosamente",
             "ya postulaste", "has postulado", "tu postulación fue recibida", "enviada correctamente"
         ]
 
