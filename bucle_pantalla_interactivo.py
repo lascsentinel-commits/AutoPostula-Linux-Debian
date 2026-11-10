@@ -696,7 +696,7 @@ async def pulsar_segundo_postular(page) -> bool:
         for loc in locs:
             try:
                 if await loc.is_visible():
-                    await loc.evaluate("el => { el.removeAttribute('disabled'); el.classList.remove('boton-deshabilitado'); }")
+                    await loc.evaluate("el => { el.removeAttribute('disabled'); el.removeAttribute('aria-disabled'); el.classList.remove('boton-deshabilitado'); }")
                     await loc.scroll_into_view_if_needed()
                     try:
                         await loc.click(timeout=5000)
@@ -1212,6 +1212,10 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
 
     # PASO 3: Rellenar formulario (incluyendo asistente multipaso LinkedIn si aplica)
     qa_list = await avanzar_wizard_linkedin_si_existe(page, empresa, titulo)
+    try:
+        tuvo_modal = await page.locator("dialog[open], div.jobs-easy-apply-modal, form#formularioPreguntasOferta, .modal.show, .offcanvas.show").count() > 0
+    except Exception:
+        tuvo_modal = False
 
     # Habilitar el segundo botón 'Postular'
     await page.evaluate('''() => {
@@ -1452,10 +1456,10 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             pass
 
         # Si hubo formulario de preguntas (modal o dialog LinkedIn) y se cerró tras el clic de envío
-        if qa_list:
+        if qa_list or tuvo_modal:
             modal_abierto = await page.evaluate('''() => {
-                const form = document.querySelector("form#formularioPreguntasOferta") || document.querySelector(".modal.show") || document.querySelector(".offcanvas.show") || document.querySelector("dialog[open]");
-                return form && form.offsetParent !== null;
+                const form = document.querySelector("form#formularioPreguntasOferta") || document.querySelector(".modal.show") || document.querySelector(".offcanvas.show") || document.querySelector("dialog[open]") || document.querySelector("div.jobs-easy-apply-modal");
+                return Boolean(form && form.offsetParent !== null);
             }''')
             if modal_abierto is False:
                 es_exito = True
