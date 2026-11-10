@@ -1106,6 +1106,7 @@ async def pulsar_segundo_postular(page) -> bool:
         "div[role='dialog'] button:has-text('Enviar solicitud')",
         "input[type='submit'].enviar-postula",
         "input[type='submit'][value*='Enviar postulación' i]",
+        "input[type='submit'][name='commit']",
         "div.jobs-easy-apply-modal button:has-text('Enviar solicitud')",
         "button:has-text('Enviar solicitud')",
         "button#postulation-questions",
@@ -1286,8 +1287,26 @@ async def manejar_redireccion_externa(page):
             except Exception:
                 pass
 
-        # 2. En portales ATS externos (CSOD, Workday, AIRA, Buk, Greenhouse, HiringRoom, Pandape, TrabajaEnElChile), pulsar el botón CTA
+        # 2. En portales ATS externos (CSOD, Workday, AIRA, Buk, Greenhouse, HiringRoom, Pandape, TrabajaEnElChile, Teamtailor, Get on Board), pulsar el botón CTA
         u_low = page.url.lower()
+        if "myworkdayjobs.com" in u_low:
+            try:
+                await page.locator("a:has-text('Rellenar automáticamente con currículo'), a:has-text('Autofill with Resume'), button[data-automation-id='GoogleSignInButton'], input[type='file']").first.wait_for(state="visible", timeout=5000)
+            except Exception:
+                pass
+        if "teamtailor.com" in u_low:
+            try:
+                modal_abierto = await page.locator("input#candidate_first_name:visible").count() > 0
+                if not modal_abierto:
+                    btn_tt = page.locator("button.careersite-button:has-text('Enviar solicitud'), button:has-text('Enviar solicitud'):visible").first
+                    if await btn_tt.count() > 0 and await btn_tt.is_visible():
+                        print("🚀 Teamtailor detectado. Pulsando 'Enviar solicitud' para abrir formulario de candidatura...")
+                        await btn_tt.scroll_into_view_if_needed()
+                        await btn_tt.click(timeout=5000)
+                        await asyncio.sleep(2.5)
+                        clic_redir = True
+            except Exception:
+                pass
         es_portal_principal = any(dom in u_low for dom in ["firstjob.me", "trabajando.cl", "laborum.cl", "duoclaboral.cl", "computrabajo", "chiletrabajos"]) and ("pandape" not in u_low)
         if not es_portal_principal or ronda == 1:
             selectores_cta_ext = [
@@ -1306,6 +1325,8 @@ async def manejar_redireccion_externa(page):
                 "a:has-text('Solicitar ahora')",
                 "button:has-text('Postular ahora')",
                 "a:has-text('Postular ahora')",
+                "a:text-is('Postular')",
+                "button:text-is('Postular')",
                 "button:has-text('Apply now')",
                 "a:has-text('Apply now')",
                 "button:has-text('Iniciar postulación')",
@@ -1317,7 +1338,12 @@ async def manejar_redireccion_externa(page):
                     locs = await page.locator(sel).all()
                     for loc in locs:
                         if await loc.is_visible():
-                            en_zona_ajena = await loc.evaluate("el => !!(el.closest('header, nav, footer, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden=\"true\"]'))")
+                            en_zona_ajena = await loc.evaluate('''el => {
+                                if (el.closest('header, nav, footer, aside, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden="true"], .gb-results-list, .similar-jobs, [class*="related"]')) return true;
+                                const href = (el.getAttribute('href') || '').toLowerCase();
+                                if (href.includes('widget_related_jobs')) return true;
+                                return false;
+                            }''')
                             if en_zona_ajena:
                                 continue
                             # Evitar repetir clic si ya estamos dentro de un formulario activo (/application o con inputs de login/contacto)
@@ -1690,7 +1716,7 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
         try:
             meta = await inp.evaluate(r'''el => {
                 if (el.dataset.autopostulaFilled === '1' || el.disabled || el.readOnly) return {skip: true};
-                if (el.getAttribute('data-automation-id') === 'beecatcher') return {skip: true};
+                if (el.getAttribute('data-automation-id') === 'beecatcher' || el.id === 'full_email') return {skip: true};
                 const parentTxt = (el.closest('div, label, fieldset')?.innerText || '').toLowerCase();
                 if (parentTxt.includes('for robots only') || parentTxt.includes('do not enter if you')) return {skip: true};
                 if (el.closest('header') || el.closest('nav') || el.closest('footer') || el.closest('.search-box') || el.closest('#search')) return {skip: true};
@@ -2304,7 +2330,7 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
             sel_enviar = "dialog[open] button:has-text('Enviar solicitud'), dialog[open] button:has-text('Submit application'), div[role='dialog'] button:has-text('Enviar solicitud'), .jobs-easy-apply-modal button:has-text('Enviar solicitud')"
             sel_avanzar = "dialog[open] button:has-text('Revisar'), dialog[open] button:has-text('Siguiente'), dialog[open] button:has-text('Next'), dialog[open] button:has-text('Review'), div[role='dialog'] button:has-text('Revisar'), div[role='dialog'] button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Revisar')"
         else:
-            sel_enviar = "button:has-text('Enviar solicitud'), button:has-text('Enviar postulación'), button:has-text('Finalizar postulación'), button:has-text('Submit application'), button:text-is('Enviar'), input[type='submit'][value*='Enviar' i]"
+            sel_enviar = "button:has-text('Enviar solicitud'), button:has-text('Enviar postulación'), button:has-text('Finalizar postulación'), button:has-text('Submit application'), button:text-is('Enviar'), input[type='submit'][value*='Enviar' i], input[type='submit'][name='commit']"
             sel_avanzar = "button:has-text('Siguiente'), button:has-text('Guardar y continuar'), button:has-text('Continuar'), input[type='submit'][value*='Continuar' i], button:has-text('Next'), button:has-text('Continue'), button:has-text('Revisar')"
 
         # ¿Ya estamos en el paso final?
@@ -2531,7 +2557,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if any(w in body_text for w in [
         "ya te has postulado", "ya has postulado", "ya estás postulado",
         "ya postulaste", "postulación enviada", "solicitud enviada",
-        "candidatura enviada", "postulación recibida"
+        "candidatura enviada", "postulación recibida", "ver tu postulación",
+        "you already applied"
     ]):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta"
 
@@ -2593,7 +2620,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if any(w in body_tras_clic for w in [
         "ya te postulaste", "ya te has postulado", "ya has postulado",
         "ya estás postulado", "ya postulaste", "postulación enviada",
-        "solicitud enviada", "candidatura enviada", "postulación recibida"
+        "solicitud enviada", "candidatura enviada", "postulación recibida",
+        "ver tu postulación", "you already applied"
     ]):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras clic inicial)"
 
@@ -3087,11 +3115,41 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
             else:
                 c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Revisión en pantalla] {msg}", of_id))
                 conn.commit()
-                print(f"⚠️  Oferta #{of_id} no confirmó envío automático. MANTENIENDO PESTAÑA ABIERTA PARA EL USUARIO.")
-                hablar(f"Oferta de {empresa} en pantalla sin confirmación final. Se deja abierta para tu revisión.")
+                print(f"⚠️  Oferta #{of_id} NO completó o no confirmó envío automático. PAUSANDO Y MANTENIENDO PESTAÑA ABIERTA.")
+                GLOBAL_BOT_CONTROL["paused"] = True
+                GLOBAL_BOT_CONTROL["timer_text"] = "SIN ENVIAR"
+                traer_brave_al_frente()
                 await sincronizar_widgets_navegador(browser)
-                await asyncio.sleep(2.5)
-                # NO cerrar ninguna pestaña de la oferta sin confirmación de éxito
+                hablar(f"Atención: la postulación a {empresa} no se completó ni confirmó el envío. Queda pausada y abierta para revisarla. Cuando esté lista o quieras seguir, pulsa Reanudar Bot.")
+
+                while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"]:
+                    await sincronizar_widgets_navegador(browser)
+                    await asyncio.sleep(0.5)
+
+                if GLOBAL_BOT_CONTROL["stop"]:
+                    conn.close()
+                    await desactivar_widgets_navegador(browser)
+                    return
+
+                # Comprobar al reanudar si el usuario completó y confirmó el envío en pantalla
+                try:
+                    pg_act = tabs_oferta[-1] if tabs_oferta else None
+                    if pg_act and not pg_act.is_closed():
+                        bt_post_res = (await pg_act.inner_text("body") or "").lower()
+                        if any(w in bt_post_res for w in ["postulación exitosa", "solicitud completada", "postulación enviada", "solicitud enviada", "gracias por postular", "candidatura enviada"]):
+                            c.execute(
+                                "UPDATE postulaciones SET estado = ?, fecha_postulacion = ?, metodo_postulacion = 'brave_cdp_pantalla', notas = ? WHERE id = ?",
+                                ("🟢 Postulado Confirmado", now_str, "[Completado manualmente tras pausa]", of_id)
+                            )
+                            conn.commit()
+                            exitosas += 1
+                            for pg_o in tabs_oferta:
+                                try:
+                                    await pg_o.close()
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
 
             conn.close()
             await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas=set(tabs_oferta) if res_tipo not in ["ok", "ya_postulado", "cerrada", "descartada_desc", "requiere_login", "captcha_antibot"] else None)
