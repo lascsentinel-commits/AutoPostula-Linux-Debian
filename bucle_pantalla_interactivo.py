@@ -1538,10 +1538,11 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
 
 
 async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> list[dict]:
-    """Completa formularios de 1 o múltiples pasos en LinkedIn Easy Apply (<dialog open>) y portales ATS externos (CSOD, AIRA, Buk, Workday, etc.), rellenando datos personales, CV PDF y preguntas."""
+    """Completa formularios de 1 o múltiples pasos en LinkedIn Easy Apply (<dialog open> o role=dialog) y portales ATS externos (CSOD, AIRA, Buk, Workday, etc.), rellenando datos personales, CV PDF y preguntas."""
     qa_acumulada = []
+    sel_dlg = "dialog[open], div.jobs-easy-apply-modal, div[role='dialog']:has-text('Enviar solicitud'), div[role='dialog']:has-text('Siguiente'), div[role='dialog']:has-text('Revisar')"
     try:
-        tiene_dlg = await page.locator("dialog[open], div.jobs-easy-apply-modal").count() > 0
+        tiene_dlg = await page.locator(sel_dlg).count() > 0
     except Exception:
         tiene_dlg = False
 
@@ -1562,8 +1563,8 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
         await asyncio.sleep(0.6)
 
         if tiene_dlg:
-            sel_enviar = "dialog[open] button:has-text('Enviar solicitud'), dialog[open] button:has-text('Submit application'), .jobs-easy-apply-modal button:has-text('Enviar solicitud')"
-            sel_avanzar = "dialog[open] button:has-text('Revisar'), dialog[open] button:has-text('Siguiente'), dialog[open] button:has-text('Next'), dialog[open] button:has-text('Review'), .jobs-easy-apply-modal button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Revisar')"
+            sel_enviar = "dialog[open] button:has-text('Enviar solicitud'), dialog[open] button:has-text('Submit application'), div[role='dialog'] button:has-text('Enviar solicitud'), .jobs-easy-apply-modal button:has-text('Enviar solicitud')"
+            sel_avanzar = "dialog[open] button:has-text('Revisar'), dialog[open] button:has-text('Siguiente'), dialog[open] button:has-text('Next'), dialog[open] button:has-text('Review'), div[role='dialog'] button:has-text('Revisar'), div[role='dialog'] button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Revisar')"
         else:
             sel_enviar = "button:has-text('Enviar solicitud'), button:has-text('Enviar postulación'), button:has-text('Finalizar postulación'), button:has-text('Submit application'), button:text-is('Enviar'), input[type='submit'][value*='Enviar']"
             sel_avanzar = "button:has-text('Siguiente'), button:has-text('Guardar y continuar'), button:has-text('Continuar'), button:has-text('Next'), button:has-text('Continue'), button:has-text('Revisar')"
@@ -1604,6 +1605,125 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
     return qa_acumulada
 
 
+
+
+async def leer_y_validar_descripcion_oferta(page, oferta: dict) -> tuple[bool, str, str]:
+    """Expande ('Ver más' / '… más' / expandable-text-button), lee y guarda la descripción completa ('Acerca del empleo') y valida si la oferta cumple el perfil del candidato."""
+    of_id = oferta.get("id")
+    empresa = oferta.get("empresa", "la empresa")
+    titulo = oferta.get("titulo", "")
+    ubicacion = oferta.get("ubicacion", "")
+
+    # 1. Hacer clic en el botón '… más' / 'Ver más' / 'See more' de la descripción
+    expand_selectors = [
+        "[data-testid='expandable-text-button']",
+        "button.jobs-description__footer-button",
+        "button[aria-label*='ver más']",
+        "button[aria-label*='Ver más']",
+        "button:has-text('… más')",
+        "button:has-text('... más')",
+        "button:has-text('Ver más')",
+        "button:has-text('See more')",
+    ]
+    for sel in expand_selectors:
+        try:
+            locs = await page.locator(sel).all()
+            for loc in locs:
+                if await loc.is_visible():
+                    valido_btn = await loc.evaluate('''el => {
+                        if (el.closest('header') || el.closest('nav') || el.closest('#autopostula-root-container') || el.closest('.job-card-container') || el.closest('.jobs-similar-jobs')) return false;
+                        const t = (el.innerText || '').toLowerCase();
+                        return !t.includes('empleos como este');
+                    }''')
+                    if valido_btn:
+                        await loc.scroll_into_view_if_needed()
+                        await loc.click(timeout=2500)
+                        await asyncio.sleep(0.6)
+                        break
+        except Exception:
+            pass
+
+    # 2. Extraer el texto completo de 'Acerca del empleo' o contenedor de descripción del portal
+    desc_extraida = ""
+    try:
+        desc_extraida = await page.evaluate(r'''() => {
+            const h = Array.from(document.querySelectorAll('h1, h2, h3, h4, span, p')).find(e => {
+                const t = (e.innerText || '').trim().toLowerCase();
+                return t === 'acerca del empleo' || t === 'about the job' || t === 'descripción del empleo' || t === 'descripción de la oferta' || t === 'funciones del cargo';
+            });
+            if (h) {
+                let sec = h;
+                for (let k = 0; k < 6 && sec; k++) {
+                    const tx = (sec.innerText || '').trim();
+                    if (tx.length > 220 && tx.length < 14000) return tx;
+                    sec = sec.parentElement;
+                }
+            }
+            const known = document.querySelector('.jobs-description-content__text, #job-details, .job-description, #oferta-descripcion, .descripcion-oferta');
+            if (known && (known.innerText || '').trim().length > 100) {
+                return known.innerText.trim();
+            }
+            return ((document.querySelector('main') || document.body).innerText || '').trim().slice(0, 6000);
+        }''') or ""
+    except Exception:
+        desc_extraida = ""
+
+    desc_extraida = re.sub(r'\n{3,}', '\n\n', desc_extraida).strip()
+
+    # Guardar descripción completa en SQLite si aportó más detalle
+    if of_id and len(desc_extraida) > len(oferta.get("descripcion") or ""):
+        oferta["descripcion"] = desc_extraida
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE postulaciones SET descripcion = ? WHERE id = ?", (desc_extraida[:8000], of_id))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    desc_low = f"{titulo}\n{desc_extraida}".lower()
+
+    # 3. Validar restricciones excluyentes dentro de la descripción expandida
+    # A) Duración mínima incompatible (>= 6 meses obligatorios sin flexibilidad de 3 meses)
+    if re.search(r'(m[ií]nimo|duraci[oó]n\s+m[ií]nima|disponibilidad\s+m[ií]nima|excluyente)\s*(de\s*)?(6|seis|6\+|12)\s*meses', desc_low) and not re.search(r'(3|tres|cuatro|4)\s*(a|y|-)\s*6\s*meses', desc_low):
+        motivo = "Exige duración mínima obligatoria de 6 meses o más"
+        print(f"⏭️  Descripción descartada ({empresa}): {motivo}")
+        hablar(f"Leí Acerca del empleo de {empresa} y la descarto porque {motivo}.")
+        return False, desc_extraida, motivo
+
+    # B) Ubicación fuera de Región Metropolitana / no remota
+    if re.search(r'(presencial en|sede en|ubicaci[oó]n[:\s]+|residir en)\s+(valpara[ií]so|vi[nñ]a del mar|concepci[oó]n|temuco|antofagasta|puerto montt|la serena|coquimbo|rancagua|talca|arica|iquique)', desc_low):
+        if not any(rm in desc_low for rm in ["santiago", "metropolitana", "las condes", "providencia", "remoto", "híbrido", "hibrido"]):
+            motivo = "Presencial fuera de la Región Metropolitana"
+            print(f"⏭️  Descripción descartada ({empresa}): {motivo}")
+            hablar(f"Leí Acerca del empleo de {empresa} y la descarto porque es {motivo}.")
+            return False, desc_extraida, motivo
+
+    # C) Detectar pilares técnicos compatibles
+    pilares = []
+    if any(k in desc_low for k in ["ciberseguridad", "seguridad", "vulnerabilid", "pentest", "soc", "riesgo", "auditoría", "auditoria"]):
+        pilares.append("Seguridad y vulnerabilidades")
+    if any(k in desc_low for k in ["agente", "agentes", "inteligencia artificial", "prompt", "llm", "rag", "ia "]):
+        pilares.append("Agentes de IA")
+    if any(k in desc_low for k in ["docker", "kubernetes", "contenedores", "github", "devops", "cloud", "aws", "azure", "gcp"]):
+        pilares.append("Contenedores, Cloud y GitHub")
+    if any(k in desc_low for k in ["base de datos", "bases de datos", "sql", "postgres", "mysql", "sqlite"]):
+        pilares.append("Bases de datos")
+    if any(k in desc_low for k in ["infraestructura", "redes", "conectividad", "telecomunicaciones", "linux", "servidores", "plataformas"]):
+        pilares.append("Infraestructura, redes y sistemas")
+    if any(k in desc_low for k in ["soporte", "mesa de ayuda", "mesa de servicio", "hardware", "ti "]):
+        pilares.append("Soporte TI")
+
+    if not pilares and re.search(r'(desarrollo web|frontend|react|angular|vue|php|wordpress|marketing|ventas|contabilidad|comercial)', desc_low):
+        motivo = "Enfocada solo en desarrollo web/área no alineada sin seguridad, infra, bases de datos, contenedores ni IA"
+        print(f"⏭️  Descripción descartada ({empresa}): {motivo}")
+        hablar(f"Leí la descripción de {empresa} y la descarto por estar fuera de tu perfil.")
+        return False, desc_extraida, motivo
+
+    resumen_pilares = ", ".join(pilares[:3]) if pilares else "TI / Sistemas"
+    print(f"📖 Descripción leída ({len(desc_extraida)} chars) | Válida ✅ | Pilares: {resumen_pilares}")
+    hablar(f"Leí la descripción completa de {empresa}: es una oferta válida orientada a {resumen_pilares}.")
+    return True, desc_extraida, f"Válida ({resumen_pilares})"
 
 
 async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int = 30, tabs_oferta: list | None = None) -> tuple[str, str]:
@@ -1652,6 +1772,11 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if any(w in body_text for w in FRASES_CERRADA):
         print("⚠️  Detectado mensaje de oferta cerrada o finalizada en el portal.")
         return "cerrada", "Oferta cerrada o expirada en el portal"
+
+    # PASO 0.5: Expandir y leer 'Acerca del empleo' / descripción completa para validar requisitos reales
+    es_valida, _desc_comp, motivo_desc = await leer_y_validar_descripcion_oferta(page, oferta)
+    if not es_valida:
+        return "descartada_desc", motivo_desc
 
     # PASO 1: Pulsar el primer botón 'Postula fácil' / 'Postularme' / 'Solicitud sencilla' / 'Solicitar'
     print("Paso 1: Buscando y pulsando botón inicial (Postula fácil / Solicitud sencilla)...")
@@ -2064,6 +2189,15 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                 hablar(f"Postulación a {empresa} confirmada con éxito visible en pantalla.")
                 print(f"👁️ Manteniendo pantalla visible 4 segundos antes de cerrar pestaña confirmada...")
                 await asyncio.sleep(4.0)
+                for pg_o in tabs_oferta:
+                    try:
+                        await pg_o.close()
+                    except Exception:
+                        pass
+            elif res_tipo == "descartada_desc":
+                nuevo_estado = "⏭️ Descartada (Descripción no compatible)"
+                c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", (nuevo_estado, msg, of_id))
+                conn.commit()
                 for pg_o in tabs_oferta:
                     try:
                         await pg_o.close()
