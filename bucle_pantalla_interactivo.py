@@ -587,7 +587,14 @@ async def comprobar_pausa_y_parada(page) -> str:
 
 
 async def pulsar_primer_postula(page) -> bool:
-    """Busca y hace clic en el botón inicial 'Postula fácil' / 'Postularme' / 'Postular'."""
+    """Busca y hace clic en el botón inicial 'Postula fácil' / 'Postularme' / 'Solicitud sencilla' / 'Solicitar'."""
+    # Si ya está abierto un modal de LinkedIn Easy Apply, no intentar hacer clic debajo
+    try:
+        if await page.locator("dialog[open], div.jobs-easy-apply-modal").count() > 0:
+            return True
+    except Exception:
+        pass
+
     selectores = [
         "button.btn.primary-btn.blue.aim",
         "button:has-text('Postula fácil')",
@@ -597,9 +604,13 @@ async def pulsar_primer_postula(page) -> bool:
         "button:has-text('Postular')",
         "a:has-text('Postular')",
         "a:has-text('Postula fácil')",
+        "button[aria-label*='Solicitud sencilla']",
         "button:has-text('Solicitud sencilla')",
-        "a:has-text('Solicitud sencilla')",
+        "button[aria-label*='Easy Apply']",
         "button.jobs-apply-button",
+        "a[aria-label*='Solicitar en el sitio']",
+        "a:has-text('Solicitar')",
+        "button:has-text('Solicitar')",
         "a#btnPostular",
         "#applyOfferSticky",
     ]
@@ -608,16 +619,32 @@ async def pulsar_primer_postula(page) -> bool:
         for loc in locs:
             try:
                 if await loc.is_visible():
+                    # Evitar falsos positivos en tarjetas de empleos recomendados en LinkedIn
+                    en_card = await loc.evaluate("el => !!el.closest('.job-card-container, .jobs-similar-jobs')")
+                    if en_card:
+                        continue
                     await loc.scroll_into_view_if_needed()
-                    await loc.click()
+                    try:
+                        await loc.click(timeout=4000)
+                    except Exception:
+                        await loc.evaluate("el => el.click()")
                     return True
             except Exception:
                 pass
 
     return await page.evaluate('''() => {
         const btns = Array.from(document.querySelectorAll('button, a.btn, a')).filter(el => {
+            if (el.closest('.job-card-container, .jobs-similar-jobs')) return false;
             const txt = (el.innerText || el.textContent || "").trim().toLowerCase();
-            return (txt.includes('postula') || txt.includes('postular') || txt.includes('solicitud')) && el.offsetParent !== null;
+            const aria = (el.getAttribute('aria-label') || "").toLowerCase();
+            return (
+                txt.includes('postula') ||
+                txt.includes('postular') ||
+                txt.includes('solicitud sencilla') ||
+                txt === 'solicitar' ||
+                aria.includes('solicitud sencilla') ||
+                aria.includes('solicitar en el sitio')
+            ) && el.offsetParent !== null;
         });
         if (btns.length > 0) {
             btns[0].scrollIntoView({ block: 'center' });
@@ -644,8 +671,11 @@ async def pulsar_comenzar_si_existe(page):
 
 
 async def pulsar_segundo_postular(page) -> bool:
-    """Pulsa el botón final de envío del formulario ('Postular' / 'Enviar' / 'Enviar mi CV')."""
+    """Pulsa el botón final de envío del formulario ('Postular' / 'Enviar solicitud' / 'Enviar' / 'Enviar mi CV')."""
     selectores_finales = [
+        "dialog[open] button:has-text('Enviar solicitud')",
+        "dialog[open] button:has-text('Submit application')",
+        "button:has-text('Enviar solicitud')",
         "button#postulation-questions",
         "#form-postulation-questions button[type='submit']",
         "button.submit.submit-auto-width",
@@ -668,7 +698,10 @@ async def pulsar_segundo_postular(page) -> bool:
                 if await loc.is_visible():
                     await loc.evaluate("el => { el.removeAttribute('disabled'); el.classList.remove('boton-deshabilitado'); }")
                     await loc.scroll_into_view_if_needed()
-                    await loc.click()
+                    try:
+                        await loc.click(timeout=5000)
+                    except Exception:
+                        await loc.evaluate("el => el.click()")
                     return True
             except Exception:
                 pass
@@ -676,7 +709,7 @@ async def pulsar_segundo_postular(page) -> bool:
     return await page.evaluate('''() => {
         const btns = Array.from(document.querySelectorAll('button, a.btn, input[type=\"submit\"]')).filter(b => {
             const t = (b.innerText || b.value || "").trim().toLowerCase();
-            return (t === 'postular' || t.includes('postular') || t.includes('enviar') || t.includes('responder')) && b.offsetParent !== null;
+            return (t === 'postular' || t.includes('enviar solicitud') || t.includes('postular') || t.includes('enviar') || t.includes('responder')) && b.offsetParent !== null;
         });
         if (btns.length > 0) {
             btns[0].removeAttribute('disabled');
@@ -686,6 +719,397 @@ async def pulsar_segundo_postular(page) -> bool:
         }
         return false;
     }''')
+
+
+async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[dict]:
+    """Detecta, resuelve con Gemini/Memoria y rellena todas las preguntas visibles en la pantalla o paso actual."""
+    loc_tas = []
+    # Si hay un dialog abierto (LinkedIn Easy Apply SDUI), priorizar estrictamente los campos dentro de él
+    tiene_dialog = False
+    try:
+        tiene_dialog = await page.locator("dialog[open], div.jobs-easy-apply-modal").count() > 0
+    except Exception:
+        pass
+
+    if tiene_dialog:
+        todos_candidatos = await page.locator("dialog[open] input[type='text']:visible, dialog[open] input[type='number']:visible, dialog[open] textarea:visible, div.jobs-easy-apply-modal input[type='text']:visible, div.jobs-easy-apply-modal textarea:visible").all()
+    else:
+        todos_candidatos = await page.locator("form#form-postulation-questions input[type='text']:visible, form#form-postulation-questions textarea:visible, form#formularioPreguntasOferta textarea, div.offcanvas textarea, textarea:visible, input[name*='filter_questions']:visible, input[name*='pregunta']:visible, .form-group input[type='text']:visible, textarea, input[type='text']:visible, input[type='number']:visible").all()
+    
+    seen_elements = set()
+    for el in todos_candidatos:
+        try:
+            if not await el.is_visible():
+                continue
+            es_valido = await el.evaluate(r'''el => {
+                if (el.type === 'search' || el.type === 'hidden' || el.type === 'submit' || el.type === 'radio' || el.type === 'checkbox') return false;
+                if (el.closest('header') || el.closest('nav') || el.closest('#navbar') || el.closest('.search-box') || el.closest('#search') || el.closest('.filters') || el.closest('.sidebar') || el.closest('.banner')) return false;
+                
+                // En LinkedIn Easy Apply, si el input ya viene prellenado con teléfono/ciudad/nombre y no es una pregunta, respetarlo
+                if (el.closest('dialog[open]') || el.closest('.jobs-easy-apply-modal')) {
+                    const v = (el.value || '').trim();
+                    const container = el.parentElement && el.parentElement.parentElement && el.parentElement.parentElement.parentElement;
+                    const ctxt = container ? container.innerText.toLowerCase() : '';
+                    if (v && (ctxt.includes('teléfono') || ctxt.includes('phone') || ctxt.includes('correo') || ctxt.includes('email') || ctxt.includes('ciudad') || ctxt.includes('city'))) {
+                        return false;
+                    }
+                    return true;
+                }
+
+                // Si está dentro de un formulario de postulación explícito o su name es filter_questions, ES VÁLIDO DE INMEDIATO
+                if (el.closest('#form-postulation-questions') || el.closest('form#formularioPreguntasOferta') || el.closest('.modal') || el.closest('.offcanvas') || el.closest('#formPostular') || el.closest('.kq-container') || (el.name && el.name.startsWith('filter_questions'))) {
+                    return true;
+                }
+
+                const name = (el.name || "").toLowerCase();
+                const id = (el.id || "").toLowerCase();
+                const placeholder = (el.placeholder || "").toLowerCase();
+                const aria = (el.getAttribute('aria-label') || "").toLowerCase();
+                const cls = (el.className || "").toLowerCase();
+
+                const blacklist = ['search', 'buscar', 'busqueda', 'filtro', 'title', 'keywords', 'keyword', 'query', 'cargo', 'location', 'ubicacion', 'selectized', 'form_co', 'form_category', 'form_client', 'email_suscribir', 'newsletter'];
+                for (let b of blacklist) {
+                    if (name === b || id === b || placeholder.includes(b) || aria.includes(b) || cls.includes(b)) {
+                        return false;
+                    }
+                }
+                return true;
+            }''')
+            if es_valido:
+                handle_id = await el.evaluate('el => el.name || el.id || el.placeholder || Math.random()')
+                if handle_id not in seen_elements:
+                    seen_elements.add(handle_id)
+                    loc_tas.append(el)
+        except Exception:
+            pass
+    
+    preguntas_para_llm = []
+    elementos_info = []
+
+    for idx, ta in enumerate(loc_tas):
+        try:
+            info_pregunta = await ta.evaluate(r'''el => {
+                let num = '';
+                let txt = '';
+                const group = el.closest('.input-style') || el.closest('div[id^="pregunta_"]') || el.closest('.form-group') || el.closest('.mb-3') || el.closest('.b_input') || el.closest('.b_textarea') || el.closest('.fb-dash-form-element') || el.parentElement;
+                if (group) {
+                    const l2 = group.querySelector('label.type2');
+                    if (l2 && l2.innerText.trim()) {
+                        txt = l2.innerText.trim();
+                        const l1 = group.querySelector('label.type1');
+                        if (l1) num = l1.innerText.trim();
+                    }
+
+                    if (!txt) {
+                        const headings = Array.from(group.querySelectorAll('h6, h5, h4, h3, legend, label')).filter(h => {
+                            const t = h.innerText.toLowerCase();
+                            return !t.includes('premium') && !t.includes('caracteres') && !t.includes('automática') && !t.includes('currículum');
+                        });
+                        if (headings.length > 0) {
+                            txt = headings[0].innerText.trim();
+                        }
+                    }
+
+                    if (!txt) {
+                        const lines = group.innerText.split(/\r?\n/).map(s => s.trim()).filter(s => {
+                            const sl = s.toLowerCase();
+                            return s && !sl.includes('caracteres') && !sl.includes('premium') && !sl.includes('obligatorio') && !sl.includes('automática') && !/^\d+\/\d+$/.test(sl);
+                        });
+                        if (lines.length > 0) txt = lines[0];
+                    }
+                }
+
+                // Fallback SDUI LinkedIn: subir hasta 4 ancestros buscando el enunciado de la pregunta
+                if (!txt) {
+                    let cur = el.parentElement;
+                    for (let depth = 0; depth < 4 && cur; depth++) {
+                        const lines = (cur.innerText || "").split(/\r?\n/).map(s => s.trim()).filter(s => {
+                            const sl = s.toLowerCase();
+                            return s.length > 5 && !sl.includes('caracteres') && !/^\d+\/\d+$/.test(sl) && sl !== 'yes' && sl !== 'no';
+                        });
+                        if (lines.length > 0) {
+                            txt = lines[0];
+                            break;
+                        }
+                        cur = cur.parentElement;
+                    }
+                }
+                return { num: num, txt: txt };
+            }''')
+
+            q_num = info_pregunta.get("num") or f"Pregunta {idx + 1}"
+            q_text = info_pregunta.get("txt") or f"Pregunta {idx + 1}"
+            preguntas_para_llm.append({"id": idx, "num": q_num, "pregunta": q_text})
+            elementos_info.append({"ta": ta, "num": q_num, "pregunta": q_text})
+        except Exception as e:
+            print(f"Aviso al extraer pregunta {idx}: {e}")
+
+    respuestas_llm = {}
+    if preguntas_para_llm:
+        print(f"🤖 Consultando a Gemini 3.5 Flash-Lite / Memoria para {len(preguntas_para_llm)} preguntas...")
+        respuestas_llm = resolver_preguntas_con_gemini_en_lote(preguntas_para_llm, empresa=empresa, cargo=titulo)
+
+    qa_list = []
+    seen = set()
+
+    for idx, item in enumerate(elementos_info):
+        try:
+            ta = item["ta"]
+            q_num = item["num"]
+            q_text = item["pregunta"]
+
+            info_campo = await ta.evaluate(r'''el => {
+                const isNumType = el.type === 'number' || el.inputMode === 'numeric' || (el.getAttribute('pattern') && el.getAttribute('pattern').includes('[0-9]'));
+                let group = el.closest('.input-style') || el.closest('div[id^="pregunta_"]') || el.closest('.form-group') || el.closest('.mb-3') || el.parentElement;
+                if (el.closest('dialog[open]') && el.parentElement && el.parentElement.parentElement && el.parentElement.parentElement.parentElement) {
+                    group = el.parentElement.parentElement.parentElement;
+                }
+                const gText = ((group ? group.innerText : "") + " " + (el.getAttribute('placeholder') || "")).toLowerCase();
+                const hasNumNotice = gText.includes('solo acepta números') || gText.includes('solo números') || gText.includes('numérico') || gText.includes('solo dígitos') || gText.includes('de 20 caracteres') || gText.includes('cuántos años');
+                const maxLen = parseInt(el.getAttribute('maxlength') || '9999', 10);
+                return {
+                    esNumero: isNumType || hasNumNotice || (maxLen <= 11),
+                    maxLen: maxLen,
+                    tagName: el.tagName.toLowerCase()
+                };
+            }''')
+
+            es_numero = info_campo.get("esNumero", False)
+            max_len = info_campo.get("maxLen", 9999)
+
+            resp = respuestas_llm.get(idx) or resolver_pregunta_reclutador(q_text, empresa, tipo_input="number" if es_numero else "textarea")
+
+            # 1. Regla de Oro: Prohibición absoluta de N/A en motivación o preguntas abiertas
+            p_lower = q_text.lower()
+            if any(m in p_lower for m in ["motiva", "interés", "interes", "por qué", "por que", "expectativa", "desafío", "desafio"]):
+                if not resp or resp.strip().upper() in ["N/A", "NO APLICA", "NINGUNA", "NA", "NO", ""] or len(resp.strip()) < 15:
+                    resp = f"Me motiva profundamente realizar mi práctica profesional en {empresa} para aportar con proactividad, disciplina y sólidos conocimientos técnicos en infraestructura, redes y continuidad operacional. Busco aprender de los desafíos reales del equipo, resolver incidentes y agregar valor tangible desde el primer día."
+
+            # 1.5 Regla Administrativa Duoc UC: Consolidar convenio de mínimo 360 horas antes del 15 de noviembre
+            if not es_numero and any(k in p_lower for k in ["disponibilidad", "comenzar", "iniciar", "fecha", "diciembre", "enero", "febrero", "marzo", "verano", "hasta", "cuándo", "cuando", "partir", "duración", "duracion", "meses"]):
+                if "seguro" not in p_lower and "15 de noviembre" not in resp.lower():
+                    nota_15_nov = " Para que pueda validarse y extenderse hasta enero, en Duoc UC debemos consolidar formalmente el convenio de práctica de mínimo 360 horas antes del 15 de noviembre (y así evitar pagar un semestre extra solo para la práctica)."
+                    if (len(resp) + len(nota_15_nov)) <= max_len:
+                        resp = resp.rstrip(".") + "." + nota_15_nov
+
+            # 2. Manejo estricto de campos numéricos (ej. WOM horas=360, LinkedIn años experiencia=4, edad=26)
+            if es_numero:
+                perf = obtener_perfil_activo()
+                horas_default = str(perf.get("condiciones_practica", {}).get("horas_cronologicas_requeridas", "360")) if perf else "360"
+                renta_default = str(perf.get("condiciones_legales_y_renta", {}).get("pretension_renta", "0")) if perf else "0"
+                tel_default = re.sub(r'\D', '', perf.get("datos_personales", {}).get("telefono", "56948508528")) if perf else "56948508528"
+
+                if "hora" in p_lower:
+                    resp = horas_default
+                elif any(k in p_lower for k in ["años de experiencia", "experiencia", "office", "excel"]):
+                    resp = "4"
+                elif any(k in p_lower for k in ["edad", "años tienes"]):
+                    resp = "26"
+                elif any(k in p_lower for k in ["renta", "pretension", "pretensión", "sueldo", "remuneracion", "remuneración", "monto", "esperada"]):
+                    resp = renta_default
+                elif any(k in p_lower for k in ["telefono", "teléfono", "celular", "fono"]):
+                    resp = tel_default
+                else:
+                    solo_digitos = re.sub(r'\D', '', resp)
+                    resp = solo_digitos if solo_digitos else "0"
+
+            if max_len and max_len < len(resp):
+                resp = resp[:max_len]
+
+            await ta.scroll_into_view_if_needed()
+            await ta.click()
+            await ta.fill(resp)
+            await ta.evaluate('''(el, payload) => {
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                window.__autopostula_qa_map = window.__autopostula_qa_map || {};
+                window.__autopostula_qa_map[payload.qid] = {
+                    pregunta: payload.pregunta,
+                    bot_answer: payload.resp,
+                    current_answer: el.value
+                };
+                if (!el.dataset.apListening) {
+                    el.dataset.apListening = '1';
+                    const syncEdit = () => {
+                        if (window.__autopostula_qa_map && window.__autopostula_qa_map[payload.qid]) {
+                            window.__autopostula_qa_map[payload.qid].current_answer = el.value;
+                        }
+                    };
+                    el.addEventListener('input', syncEdit);
+                    el.addEventListener('change', syncEdit);
+                }
+            }''', {"qid": str(idx), "pregunta": q_text, "resp": resp, "esNumero": es_numero})
+
+            if q_text not in seen:
+                seen.add(q_text)
+                qa_list.append({
+                    "num": q_num,
+                    "pregunta": q_text,
+                    "respuesta": resp
+                })
+            await asyncio.sleep(0.15)
+        except Exception as e:
+            print(f"Aviso al llenar campo {idx}: {e}")
+
+    # Marcar TODOS los grupos de radios y selects (soporta Español Sí/No y LinkedIn Inglés Yes/No)
+    await page.evaluate('''() => {
+        const radioNames = new Set();
+        document.querySelectorAll('input[type="radio"]').forEach(r => {
+            if (r.name) radioNames.add(r.name);
+        });
+
+        for (let name of radioNames) {
+            const inputs = Array.from(document.querySelectorAll(`input[name="${name}"]`));
+            let answered = inputs.some(inp => inp.checked);
+            if (answered) continue;
+
+            const container = inputs[0].closest('.form-group') || inputs[0].closest('div[class*="question"]') || inputs[0].closest('fieldset') || (inputs[0].parentElement && inputs[0].parentElement.parentElement && inputs[0].parentElement.parentElement.parentElement) || inputs[0].parentElement;
+            const containerText = container ? container.innerText.toLowerCase() : "";
+            const isNoExpected = containerText.includes("inclusión") || containerText.includes("ajuste razonable") || containerText.includes("discapacidad");
+
+            let targetInput = null;
+            let targetLabel = null;
+
+            for (let inp of inputs) {
+                const lbl = inp.closest('label') || (inp.id ? document.querySelector(`label[for="${CSS.escape(inp.id)}"]`) : null) || inp.parentElement;
+                const txt = lbl ? lbl.innerText.trim().toUpperCase() : (inp.value || "").toUpperCase();
+                if (isNoExpected) {
+                    if (txt === "NO" || txt.startsWith("NO")) {
+                        targetInput = inp;
+                        targetLabel = lbl;
+                        break;
+                    }
+                } else {
+                    if (txt === "SI" || txt === "SÍ" || txt === "YES" || txt.startsWith("SI ") || txt.startsWith("SÍ ") || txt.startsWith("YES ") || txt.includes("SÍ") || txt.includes("YES")) {
+                        targetInput = inp;
+                        targetLabel = lbl;
+                        break;
+                    }
+                }
+            }
+
+            if (!targetInput && !isNoExpected && inputs.length > 0) {
+                targetInput = inputs[0];
+                targetLabel = targetInput.closest('label') || (targetInput.id ? document.querySelector(`label[for="${CSS.escape(targetInput.id)}"]`) : null) || targetInput.parentElement;
+            }
+
+            if (targetInput) {
+                targetInput.checked = true;
+                if (targetLabel) targetLabel.click();
+                targetInput.click();
+                targetInput.dispatchEvent(new Event('change', { bubbles: true }));
+                targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }
+
+        const allContainers = Array.from(document.querySelectorAll('.cb-container, label.radio, .radio-label, .btn-check')).filter(l => {
+            const t = l.innerText.trim().toUpperCase();
+            return t === 'SI' || t === 'SÍ' || t === 'YES';
+        });
+        for (let l of allContainers) {
+            const inp = l.querySelector('input[type="radio"]');
+            if (inp && !inp.checked) {
+                const siblings = Array.from(document.querySelectorAll(`input[name="${inp.name}"]`));
+                if (!siblings.some(s => s.checked)) {
+                    inp.checked = true;
+                    l.click();
+                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            }
+        }
+
+        const selects = Array.from(document.querySelectorAll('form select, .input-style select, dialog[open] select, select:not([name*="search"])'));
+        for (let sel of selects) {
+            if (!sel.offsetParent) continue;
+            if (sel.value && sel.value !== "" && !sel.value.toLowerCase().includes("select")) continue;
+
+            const container = sel.closest('.input-style') || sel.closest('.form-group') || sel.parentElement;
+            const txt = container ? container.innerText.toLowerCase() : "";
+            const options = Array.from(sel.querySelectorAll('option'));
+
+            const isNo = txt.includes("inclusión") || txt.includes("discapacidad") || txt.includes("ajuste razonable");
+            let targetOption = null;
+
+            for (let opt of options) {
+                const oText = (opt.innerText || opt.textContent || "").trim().toUpperCase();
+                if (!opt.value || opt.value === "" || oText.includes("SELECCION")) continue;
+
+                if (isNo) {
+                    if (oText === "NO" || oText.startsWith("NO")) {
+                        targetOption = opt;
+                        break;
+                    }
+                } else {
+                    if (oText === "SÍ" || oText === "SI" || oText === "YES" || oText.startsWith("SÍ") || oText.startsWith("SI") || oText.startsWith("YES")) {
+                        targetOption = opt;
+                        break;
+                    }
+                }
+            }
+
+            if (!targetOption && options.length > 1) {
+                for (let opt of options) {
+                    if (opt.value && opt.value !== "") {
+                        targetOption = opt;
+                        break;
+                    }
+                }
+            }
+
+            if (targetOption) {
+                sel.value = targetOption.value;
+                sel.dispatchEvent(new Event('change', { bubbles: true }));
+                sel.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }
+    }''')
+
+    return qa_list
+
+
+async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> list[dict]:
+    """Si hay un modal multipaso de LinkedIn Easy Apply (<dialog open>), completa cada paso ('Siguiente'/'Revisar') hasta llegar a 'Enviar solicitud'."""
+    qa_acumulada = []
+    try:
+        tiene_dlg = await page.locator("dialog[open], div.jobs-easy-apply-modal").count() > 0
+    except Exception:
+        tiene_dlg = False
+
+    if not tiene_dlg:
+        return await rellenar_formulario_actual(page, empresa, titulo)
+
+    print("🔗 Detectado asistente multipaso de Solicitud Sencilla de LinkedIn...")
+    for paso in range(1, 8):
+        qa_step = await rellenar_formulario_actual(page, empresa, titulo)
+        qa_acumulada.extend(qa_step)
+        await asyncio.sleep(0.5)
+
+        # ¿Ya estamos en el paso final ('Enviar solicitud' / 'Submit application')?
+        btn_enviar = page.locator("dialog[open] button:has-text('Enviar solicitud'), dialog[open] button:has-text('Submit application'), .jobs-easy-apply-modal button:has-text('Enviar solicitud')").first
+        try:
+            if await btn_enviar.count() > 0 and await btn_enviar.is_visible():
+                print(f"✅ Asistente de LinkedIn llegó al paso final ('Enviar solicitud') en paso {paso}.")
+                break
+        except Exception:
+            pass
+
+        # Si hay 'Siguiente' o 'Revisar', avanzarlo
+        btn_avanzar = page.locator("dialog[open] button:has-text('Revisar'), dialog[open] button:has-text('Siguiente'), dialog[open] button:has-text('Next'), dialog[open] button:has-text('Review'), .jobs-easy-apply-modal button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Revisar')").first
+        try:
+            if await btn_avanzar.count() > 0 and await btn_avanzar.is_visible():
+                lbl_btn = (await btn_avanzar.inner_text() or "").strip()
+                print(f"➡️  Paso {paso} de LinkedIn completado. Pulsando '{lbl_btn}'...")
+                await btn_avanzar.click(timeout=4000)
+                await asyncio.sleep(1.5)
+            else:
+                break
+        except Exception as e:
+            print(f"Aviso avanzando paso {paso} de LinkedIn: {e}")
+            break
+
+    return qa_acumulada
+
+
 
 
 async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int = 30) -> tuple[str, str]:
@@ -731,11 +1155,26 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         print("⚠️  Detectado mensaje de oferta cerrada o finalizada en el portal.")
         return "cerrada", "Oferta cerrada o expirada en el portal"
 
-    # PASO 1: Pulsar el primer botón 'Postula fácil' / 'Postularme'
-    print("Paso 1: Buscando y pulsando botón inicial (Postula fácil)...")
+    # PASO 1: Pulsar el primer botón 'Postula fácil' / 'Postularme' / 'Solicitud sencilla' / 'Solicitar'
+    print("Paso 1: Buscando y pulsando botón inicial (Postula fácil / Solicitud sencilla)...")
+    tabs_antes = list(page.context.pages)
     clic_inicial = await pulsar_primer_postula(page)
     print(f"Resultado clic inicial: {'Exitoso' if clic_inicial else 'No encontrado'}")
-    await asyncio.sleep(2.0)
+    await asyncio.sleep(2.5)
+
+    # Detectar si el clic abrió una pestaña externa nueva (ej: LinkedIn 'Solicitar' en el sitio de la empresa)
+    tabs_despues = list(page.context.pages)
+    if len(tabs_despues) > len(tabs_antes):
+        nueva_tab = [t for t in tabs_despues if t not in tabs_antes][-1]
+        print(f"🌐 Detectada nueva pestaña externa abierta: {nueva_tab.url}")
+        try:
+            await nueva_tab.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        page = nueva_tab
+        await page.bring_to_front()
+        await asyncio.sleep(1.5)
+        await inyectar_boton_flotante_control(page)
 
     # Comprobar si tras el clic inicial redirigió a un catálogo
     if es_url_catalogo(page.url, portal):
@@ -771,318 +1210,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if st == "stop":
         return "stop", "Bot detenido por el usuario con la X roja"
 
-    # PASO 3: Detectar y rellenar las preguntas en pantalla con Gemini 3.5 Flash-Lite
-    print("Paso 2: Detectando y respondiendo preguntas con Gemini 3.5 Flash-Lite y perfil Duoc UC...")
-    
-    # Buscar textareas e inputs de texto de preguntas (captura tanto textarea como input[type=text])
-    loc_tas = []
-    todos_candidatos = await page.locator("form#form-postulation-questions input[type='text']:visible, form#form-postulation-questions textarea:visible, form#formularioPreguntasOferta textarea, div.offcanvas textarea, textarea:visible, input[name*='filter_questions']:visible, input[name*='pregunta']:visible, .form-group input[type='text']:visible, textarea, input[type='text']:visible").all()
-    
-    seen_elements = set()
-    for el in todos_candidatos:
-        try:
-            if not await el.is_visible():
-                continue
-            es_valido = await el.evaluate(r'''el => {
-                if (el.type === 'search' || el.type === 'hidden' || el.type === 'submit' || el.type === 'radio' || el.type === 'checkbox') return false;
-                if (el.closest('header') || el.closest('nav') || el.closest('#navbar') || el.closest('.search-box') || el.closest('#search') || el.closest('.filters') || el.closest('.sidebar') || el.closest('.banner')) return false;
-                
-                // Si está dentro de un formulario de postulación explícito o su name es filter_questions, ES VÁLIDO DE INMEDIATO
-                if (el.closest('#form-postulation-questions') || el.closest('form#formularioPreguntasOferta') || el.closest('.modal') || el.closest('.offcanvas') || el.closest('#formPostular') || el.closest('.kq-container') || (el.name && el.name.startsWith('filter_questions'))) {
-                    return true;
-                }
-
-                const name = (el.name || "").toLowerCase();
-                const id = (el.id || "").toLowerCase();
-                const placeholder = (el.placeholder || "").toLowerCase();
-                const aria = (el.getAttribute('aria-label') || "").toLowerCase();
-                const cls = (el.className || "").toLowerCase();
-
-                // Excluir cualquier input de búsqueda o filtro fuera de postulación
-                const blacklist = ['search', 'buscar', 'busqueda', 'filtro', 'title', 'keywords', 'keyword', 'query', 'cargo', 'location', 'ubicacion', 'selectized', 'form_co', 'form_category', 'form_client', 'email_suscribir', 'newsletter'];
-                for (let b of blacklist) {
-                    if (name === b || id === b || placeholder.includes(b) || aria.includes(b) || cls.includes(b)) {
-                        return false;
-                    }
-                }
-                return true;
-            }''')
-            if es_valido:
-                handle_id = await el.evaluate('el => el.name || el.id || el.placeholder || Math.random()')
-                if handle_id not in seen_elements:
-                    seen_elements.add(handle_id)
-                    loc_tas.append(el)
-        except Exception:
-            pass
-    
-    preguntas_para_llm = []
-    elementos_info = []
-
-    for idx, ta in enumerate(loc_tas):
-        try:
-            info_pregunta = await ta.evaluate(r'''el => {
-                const group = el.closest('.input-style') || el.closest('div[id^="pregunta_"]') || el.closest('.form-group') || el.closest('.mb-3') || el.closest('.b_input') || el.closest('.b_textarea') || el.parentElement;
-                let num = '';
-                let txt = '';
-                if (group) {
-                    // 1. Trabajando.cl específico: label.type2
-                    const l2 = group.querySelector('label.type2');
-                    if (l2 && l2.innerText.trim()) {
-                        txt = l2.innerText.trim();
-                        const l1 = group.querySelector('label.type1');
-                        if (l1) num = l1.innerText.trim();
-                    }
-
-                    // 2. FirstJob y otros portales: h6, h5, h4, h3, legend (descartando banners de premium)
-                    if (!txt) {
-                        const headings = Array.from(group.querySelectorAll('h6, h5, h4, h3, legend, label')).filter(h => {
-                            const t = h.innerText.toLowerCase();
-                            return !t.includes('premium') && !t.includes('caracteres') && !t.includes('automática') && !t.includes('currículum');
-                        });
-                        if (headings.length > 0) {
-                            txt = headings[0].innerText.trim();
-                        }
-                    }
-
-                    // 3. Fallback: líneas del contenedor
-                    if (!txt) {
-                        const lines = group.innerText.split(/\r?\n/).map(s => s.trim()).filter(s => {
-                            const sl = s.toLowerCase();
-                            return s && !sl.includes('caracteres') && !sl.includes('premium') && !sl.includes('obligatorio') && !sl.includes('automática');
-                        });
-                        if (lines.length > 0) txt = lines[0];
-                    }
-                }
-                return { num: num, txt: txt };
-            }''')
-
-            q_num = info_pregunta.get("num") or f"Pregunta {idx + 1}"
-            q_text = info_pregunta.get("txt") or f"Pregunta {idx + 1}"
-            preguntas_para_llm.append({"id": idx, "num": q_num, "pregunta": q_text})
-            elementos_info.append({"ta": ta, "num": q_num, "pregunta": q_text})
-        except Exception as e:
-            print(f"Aviso al extraer pregunta {idx}: {e}")
-
-    # Llamar a Gemini 3.5 Flash-Lite para resolver todas las preguntas con razonamiento contextual
-    respuestas_llm = {}
-    if preguntas_para_llm:
-        print(f"🤖 Consultando a Gemini 3.5 Flash-Lite para {len(preguntas_para_llm)} preguntas...")
-        respuestas_llm = resolver_preguntas_con_gemini_en_lote(preguntas_para_llm, empresa=empresa, cargo=titulo)
-
-    qa_list = []
-    seen = set()
-
-    for idx, item in enumerate(elementos_info):
-        try:
-            ta = item["ta"]
-            q_num = item["num"]
-            q_text = item["pregunta"]
-
-            # Comprobar si el campo exige estrictamente números o tiene longitud corta
-            info_campo = await ta.evaluate(r'''el => {
-                const isNumType = el.type === 'number' || el.inputMode === 'numeric' || (el.getAttribute('pattern') && el.getAttribute('pattern').includes('[0-9]'));
-                const group = el.closest('.input-style') || el.closest('div[id^="pregunta_"]') || el.closest('.form-group') || el.closest('.mb-3') || el.parentElement;
-                const gText = ((group ? group.innerText : "") + " " + (el.getAttribute('placeholder') || "")).toLowerCase();
-                const hasNumNotice = gText.includes('solo acepta números') || gText.includes('solo números') || gText.includes('numérico') || gText.includes('solo dígitos');
-                const maxLen = parseInt(el.getAttribute('maxlength') || '9999', 10);
-                return {
-                    esNumero: isNumType || hasNumNotice || (maxLen <= 11),
-                    maxLen: maxLen,
-                    tagName: el.tagName.toLowerCase()
-                };
-            }''')
-
-            es_numero = info_campo.get("esNumero", False)
-            max_len = info_campo.get("maxLen", 9999)
-
-            resp = respuestas_llm.get(idx) or resolver_pregunta_reclutador(q_text, empresa, tipo_input="number" if es_numero else "textarea")
-
-            # 1. Regla de Oro: Prohibición absoluta de N/A en motivación o preguntas abiertas
-            p_lower = q_text.lower()
-            if any(m in p_lower for m in ["motiva", "interés", "interes", "por qué", "por que", "expectativa", "desafío", "desafio"]):
-                if not resp or resp.strip().upper() in ["N/A", "NO APLICA", "NINGUNA", "NA", "NO", ""] or len(resp.strip()) < 15:
-                    resp = f"Me motiva profundamente realizar mi práctica profesional en {empresa} para aportar con proactividad, disciplina y sólidos conocimientos técnicos en infraestructura, redes y continuidad operacional. Busco aprender de los desafíos reales del equipo, resolver incidentes y agregar valor tangible desde el primer día."
-
-            # 1.5 Regla Administrativa Duoc UC: Consolidar convenio de mínimo 360 horas antes del 15 de noviembre
-            if not es_numero and any(k in p_lower for k in ["disponibilidad", "comenzar", "iniciar", "fecha", "diciembre", "enero", "febrero", "marzo", "verano", "hasta", "cuándo", "cuando", "partir", "duración", "duracion", "meses"]):
-                if "seguro" not in p_lower and "15 de noviembre" not in resp.lower():
-                    nota_15_nov = " Para que pueda validarse y extenderse hasta enero, en Duoc UC debemos consolidar formalmente el convenio de práctica de mínimo 360 horas antes del 15 de noviembre (y así evitar pagar un semestre extra solo para la práctica)."
-                    if (len(resp) + len(nota_15_nov)) <= max_len:
-                        resp = resp.rstrip(".") + "." + nota_15_nov
-
-            # 2. Manejo estricto de campos numéricos (ej. WOM Pregunta 2: "¿Cuántas horas de práctica debes realizar?")
-            if es_numero:
-                perf = obtener_perfil_activo()
-                horas_default = str(perf.get("condiciones_practica", {}).get("horas_cronologicas_requeridas", "360")) if perf else "360"
-                renta_default = str(perf.get("condiciones_legales_y_renta", {}).get("pretension_renta", "0")) if perf else "0"
-                tel_default = re.sub(r'\D', '', perf.get("datos_personales", {}).get("telefono", "56948508528")) if perf else "56948508528"
-
-                if "hora" in p_lower:
-                    resp = horas_default
-                elif any(k in p_lower for k in ["edad", "años tienes"]):
-                    resp = "26"
-                elif any(k in p_lower for k in ["renta", "pretension", "pretensión", "sueldo", "remuneracion", "remuneración", "monto", "esperada"]):
-                    resp = renta_default
-                elif any(k in p_lower for k in ["telefono", "teléfono", "celular", "fono"]):
-                    resp = tel_default
-                else:
-                    solo_digitos = re.sub(r'\D', '', resp)
-                    resp = solo_digitos if solo_digitos else "0"
-
-            # 3. Ajustar si el campo tiene límite estricto de caracteres (maxlength)
-            if max_len and max_len < len(resp):
-                resp = resp[:max_len]
-
-            # Tipeo nativo de Playwright sobre el campo para que aparezca en pantalla de inmediato
-            await ta.scroll_into_view_if_needed()
-            await ta.click()
-            await ta.fill(resp)
-            await ta.evaluate('''(el, payload) => {
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                window.__autopostula_qa_map = window.__autopostula_qa_map || {};
-                window.__autopostula_qa_map[payload.qid] = {
-                    pregunta: payload.pregunta,
-                    bot_answer: payload.resp,
-                    current_answer: el.value
-                };
-                if (!el.dataset.apListening) {
-                    el.dataset.apListening = '1';
-                    const syncEdit = () => {
-                        if (window.__autopostula_qa_map && window.__autopostula_qa_map[payload.qid]) {
-                            window.__autopostula_qa_map[payload.qid].current_answer = el.value;
-                        }
-                    };
-                    el.addEventListener('input', syncEdit);
-                    el.addEventListener('change', syncEdit);
-                }
-            }''', {"qid": str(idx), "pregunta": q_text, "resp": resp, "esNumero": es_numero})
-
-            if q_text not in seen:
-                seen.add(q_text)
-                qa_list.append({
-                    "num": q_num,
-                    "pregunta": q_text,
-                    "respuesta": resp
-                })
-            await asyncio.sleep(0.15)
-        except Exception as e:
-            print(f"Aviso al llenar campo {idx}: {e}")
-
-    # Marcar TODOS los grupos de radios de disponibilidad / seguro / preguntas Si-No
-    await page.evaluate('''() => {
-        // 1. Agrupar por input[type="radio"] name para responder CADA pregunta individualmente
-        const radioNames = new Set();
-        document.querySelectorAll('input[type="radio"]').forEach(r => {
-            if (r.name) radioNames.add(r.name);
-        });
-
-        for (let name of radioNames) {
-            const inputs = Array.from(document.querySelectorAll(`input[name="${name}"]`));
-            let answered = inputs.some(inp => inp.checked);
-            if (answered) continue;
-
-            const container = inputs[0].closest('.form-group') || inputs[0].closest('div[class*="question"]') || inputs[0].closest('fieldset') || inputs[0].parentElement.parentElement;
-            const containerText = container ? container.innerText.toLowerCase() : "";
-            const isNoExpected = containerText.includes("inclusión") || containerText.includes("ajuste razonable") || containerText.includes("discapacidad");
-
-            let targetInput = null;
-            let targetLabel = null;
-
-            for (let inp of inputs) {
-                const lbl = inp.closest('label') || inp.parentElement;
-                const txt = lbl ? lbl.innerText.trim().toUpperCase() : (inp.value || "").toUpperCase();
-                if (isNoExpected) {
-                    if (txt === "NO" || txt.startsWith("NO")) {
-                        targetInput = inp;
-                        targetLabel = lbl;
-                        break;
-                    }
-                } else {
-                    if (txt === "SI" || txt === "SÍ" || txt.startsWith("SI ") || txt.startsWith("SÍ ") || txt.includes("SÍ") || txt.includes("SI")) {
-                        targetInput = inp;
-                        targetLabel = lbl;
-                        break;
-                    }
-                }
-            }
-
-            if (!targetInput && !isNoExpected && inputs.length > 0) {
-                targetInput = inputs[0];
-                targetLabel = targetInput.closest('label') || targetInput.parentElement;
-            }
-
-            if (targetInput) {
-                targetInput.checked = true;
-                if (targetLabel) targetLabel.click();
-                targetInput.dispatchEvent(new Event('change', { bubbles: true }));
-                targetInput.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-        }
-
-        // 2. Para botones/chips y etiquetas personalizadas de FirstJob
-        const allContainers = Array.from(document.querySelectorAll('.cb-container, label.radio, .radio-label, .btn-check')).filter(l => {
-            const t = l.innerText.trim().toUpperCase();
-            return t === 'SI' || t === 'SÍ';
-        });
-        for (let l of allContainers) {
-            const inp = l.querySelector('input[type="radio"]');
-            if (inp && !inp.checked) {
-                const siblings = Array.from(document.querySelectorAll(`input[name="${inp.name}"]`));
-                if (!siblings.some(s => s.checked)) {
-                    inp.checked = true;
-                    l.click();
-                    inp.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            }
-        }
-
-        // 3. Resolver SELECT dropdowns (ej. "¿Posee seguro de práctica?", "¿Disponibilidad?", etc.)
-        const selects = Array.from(document.querySelectorAll('form select, .input-style select, select:not([name*="search"])'));
-        for (let sel of selects) {
-            if (!sel.offsetParent) continue;
-            if (sel.value && sel.value !== "") continue;
-
-            const container = sel.closest('.input-style') || sel.closest('.form-group') || sel.parentElement;
-            const txt = container ? container.innerText.toLowerCase() : "";
-            const options = Array.from(sel.querySelectorAll('option'));
-
-            const isNo = txt.includes("inclusión") || txt.includes("discapacidad") || txt.includes("ajuste razonable");
-            let targetOption = null;
-
-            for (let opt of options) {
-                const oText = (opt.innerText || opt.textContent || "").trim().toUpperCase();
-                if (opt.value === "") continue;
-
-                if (isNo) {
-                    if (oText === "NO" || oText.startsWith("NO")) {
-                        targetOption = opt;
-                        break;
-                    }
-                } else {
-                    if (oText === "SÍ" || oText === "SI" || oText.startsWith("SÍ") || oText.startsWith("SI")) {
-                        targetOption = opt;
-                        break;
-                    }
-                }
-            }
-
-            if (!targetOption && options.length > 1) {
-                for (let opt of options) {
-                    if (opt.value && opt.value !== "") {
-                        targetOption = opt;
-                        break;
-                    }
-                }
-            }
-
-            if (targetOption) {
-                sel.value = targetOption.value;
-                sel.dispatchEvent(new Event('change', { bubbles: true }));
-                sel.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-        }
-    }''')
+    # PASO 3: Rellenar formulario (incluyendo asistente multipaso LinkedIn si aplica)
+    qa_list = await avanzar_wizard_linkedin_si_existe(page, empresa, titulo)
 
     # Habilitar el segundo botón 'Postular'
     await page.evaluate('''() => {
@@ -1302,7 +1431,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             "éxito", "recibida", "postulado", "gracias", "felicitaciones",
             "postulación enviada", "tu candidatura", "inscrita", "ya te has postulado",
             "en proceso", "postular de nuevo", "ya has postulado", "ya estás postulado",
-            "solicitud enviada", "postulación completada", "candidatura enviada",
+            "solicitud enviada", "envió tu solicitud", "tu solicitud se envió", "application was sent",
+            "postulación completada", "candidatura enviada",
             "ya postulaste", "has postulado", "tu postulación fue recibida", "enviada correctamente"
         ]
 
@@ -1321,15 +1451,15 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         except Exception:
             pass
 
-        # Si hubo formulario de preguntas (modal) y se cerró tras el clic de envío
+        # Si hubo formulario de preguntas (modal o dialog LinkedIn) y se cerró tras el clic de envío
         if qa_list:
             modal_abierto = await page.evaluate('''() => {
-                const form = document.querySelector("form#formularioPreguntasOferta") || document.querySelector(".modal.show") || document.querySelector(".offcanvas.show");
+                const form = document.querySelector("form#formularioPreguntasOferta") || document.querySelector(".modal.show") || document.querySelector(".offcanvas.show") || document.querySelector("dialog[open]");
                 return form && form.offsetParent !== null;
             }''')
             if modal_abierto is False:
                 es_exito = True
-                motivo_exito = "Modal de preguntas completado y cerrado exitosamente"
+                motivo_exito = "Modal / Dialog completado y cerrado exitosamente"
                 break
 
     if es_exito:
