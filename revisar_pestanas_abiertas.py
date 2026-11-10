@@ -128,6 +128,15 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
         try:
             browser = await p.chromium.connect_over_cdp("http://localhost:9222")
             ctx = browser.contexts[0]
+            try:
+                await ctx.expose_function("__autopostula_host_cmd", bp._aplicar_comando_control)
+            except Exception:
+                pass
+            try:
+                await ctx.add_init_script(bp._WIDGET_JS)
+            except Exception:
+                pass
+            await bp.sincronizar_widgets_navegador(browser)
         except Exception as e:
             print(f"❌ No se pudo conectar a Brave CDP: {e}")
             return
@@ -138,6 +147,9 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
         for idx, pg in enumerate(cand_pages, 1):
             if pg.is_closed():
                 continue
+            if await bp.comprobar_pausa_y_parada(pg) == "stop":
+                break
+            await bp.inyectar_boton_flotante_control(pg)
             url_orig = pg.url
             try:
                 title = await pg.title()
@@ -286,9 +298,18 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
                 except Exception:
                     bt_end = ""
                 cod, mot = diagnosticar_bloqueo(active_pg.url, title, {**diag_mid, "body_low": bt_end})
-                print(f"⚠️ No confirmó envío ({cod}): {mot} -> Cerrando pestaña.")
-                resultados.append({"url": active_pg.url, "titulo": title, "estado": "no_postulable_cerrada", "codigo": cod, "motivo": mot})
-                await _cerrar_pestana_seguro(ctx, active_pg)
+                es_en_curso = (
+                    cod in ["campos_obligatorios_pendientes", "sin_confirmacion_envio"]
+                    and (diag_mid.get("editable_inputs", 0) > 0 or "myworkdayjobs" in active_pg.url.lower() or "pandape" in active_pg.url.lower())
+                )
+                if es_en_curso and len(postuladas_ok) < max_mantener:
+                    print(f"📝 Formulario en curso con datos pendientes ({cod}): se MANTIENE abierta para completar/revisar.")
+                    postuladas_ok.append({"pg": active_pg, "url": active_pg.url, "titulo": title})
+                    resultados.append({"url": active_pg.url, "titulo": title, "estado": "incompleta_conservada", "codigo": cod, "motivo": mot})
+                else:
+                    print(f"⚠️ No confirmó envío ({cod}): {mot} -> Cerrando pestaña.")
+                    resultados.append({"url": active_pg.url, "titulo": title, "estado": "no_postulable_cerrada", "codigo": cod, "motivo": mot})
+                    await _cerrar_pestana_seguro(ctx, active_pg)
 
         # Dejar abiertas como máximo las últimas `max_mantener` (4) pestañas a las que postuló
         if len(postuladas_ok) > max_mantener:

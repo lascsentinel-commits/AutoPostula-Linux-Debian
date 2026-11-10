@@ -2333,12 +2333,15 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
                 lbl_btn = (await btn_avanzar.inner_text() or await btn_avanzar.get_attribute("value") or "").strip()
                 print(f"➡️  Paso {paso} ({modo}) completado. Pulsando '{lbl_btn}'...")
                 url_antes = page.url
+                txt_antes = (await page.inner_text("body") or "")[:1200]
                 await btn_avanzar.scroll_into_view_if_needed()
                 await btn_avanzar.click(timeout=5000)
-                await asyncio.sleep(2.0)
-                # Si la validación del formulario bloqueó el avance porque falta algo manual, detener avance y dejarlo para revisión
-                misma_url_sin_cambio = (page.url == url_antes)
-                if misma_url_sin_cambio and await page.locator("text=/obligatorio|requerido|required|completar este campo/i").count() > 0:
+                await asyncio.sleep(2.5)
+                # Solo detener si la pantalla NO cambió tras el clic Y hay errores visibles reales de validación
+                txt_despues = (await page.inner_text("body") or "")[:1200]
+                misma_pantalla = (page.url == url_antes and txt_antes == txt_despues)
+                err_visibles = await page.locator("[data-automation-id='errorMessage']:visible, .field-validation-error:visible, .invalid-feedback:visible, .artdeco-inline-feedback--error:visible, [role='alert']:visible").count()
+                if misma_pantalla and err_visibles > 0:
                     print(f"⚠️  Formulario ({modo}) detuvo el avance por un campo obligatorio pendiente; pasando a revisión en pantalla.")
                     break
             else:
