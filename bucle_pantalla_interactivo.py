@@ -321,6 +321,7 @@ FRASES_CERRADA = [
 ]
 
 FRASES_YA_POSTULADO = [
+    "usted ya ha presentado solicitud", "ya ha presentado solicitud",
     "ya ha realizado una solicitud", "ya has realizado una solicitud",
     "you have already applied", "ya te has postulado", "ya has postulado",
     "ya estás postulado", "ya te postulaste", "ya postulaste",
@@ -339,6 +340,7 @@ FRASES_CONFIRMACION_ENVIO = [
     "gracias por tu solicitud", "hemos recibido su solicitud", "gracias por aplicar",
     "has postulado con éxito", "ya te has postulado", "ya has postulado",
     "ya estás postulado", "ya postulaste", "postular de nuevo",
+    "usted ya ha presentado solicitud", "ya ha presentado solicitud",
     "ya ha realizado una solicitud", "ya has realizado una solicitud",
     "application was sent", "application submitted", "application received",
     "thank you for applying", "thank you for your application",
@@ -1331,11 +1333,18 @@ async def manejar_redireccion_externa(page):
             except Exception:
                 pass
 
-        # 2. En portales ATS externos (CSOD, Workday, AIRA, Buk, Greenhouse, HiringRoom, Pandape, TrabajaEnElChile, Teamtailor, Get on Board), pulsar el botón CTA
+        # 2. En portales ATS externos (CSOD, Workday, AIRA, Buk, Greenhouse, HiringRoom, Pandape, TrabajaEnElChile, Teamtailor, Get on Board), esperar montaje SPA y pulsar el botón CTA
         u_low = page.url.lower()
-        if "myworkdayjobs.com" in u_low:
+        es_portal_principal = any(dom in u_low for dom in ["firstjob.me", "trabajando.cl", "laborum.cl", "duoclaboral.cl", "computrabajo", "chiletrabajos"]) and ("pandape" not in u_low)
+        if not es_portal_principal and ronda == 0:
             try:
-                await page.locator("a:has-text('Rellenar automáticamente con currículo'), a:has-text('Autofill with Resume'), button[data-automation-id='GoogleSignInButton'], input[type='file']").first.wait_for(state="visible", timeout=5000)
+                await page.locator(
+                    "button:has-text('Solicitar ahora'), a:has-text('Solicitar ahora'), "
+                    "button:has-text('Postúlate Ahora'), button:has-text('Postularse'), "
+                    "a:has-text('Rellenar automáticamente con currículo'), a:has-text('Autofill with Resume'), "
+                    "button:has-text('Enviar solicitud'), button:has-text('Apply now'), "
+                    "button[data-automation-id='GoogleSignInButton'], input[type='file']"
+                ).first.wait_for(state="visible", timeout=7000)
             except Exception:
                 pass
         if "teamtailor.com" in u_low:
@@ -1351,7 +1360,6 @@ async def manejar_redireccion_externa(page):
                         clic_redir = True
             except Exception:
                 pass
-        es_portal_principal = any(dom in u_low for dom in ["firstjob.me", "trabajando.cl", "laborum.cl", "duoclaboral.cl", "computrabajo", "chiletrabajos"]) and ("pandape" not in u_low)
         if not es_portal_principal or ronda == 1:
             selectores_cta_ext = [
                 "a:has-text('POSTULAR A ESTA VACANTE')",
@@ -2819,7 +2827,10 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
 
     traer_brave_al_frente()
 
-    ya_en_formulario_ats = "myworkdayjobs.com" in (page.url or "").lower() and "/apply" in (page.url or "").lower()
+    ya_en_formulario_ats = (
+        ("myworkdayjobs.com" in (page.url or "").lower() and "/apply" in (page.url or "").lower())
+        or ("csod.com" in (page.url or "").lower() and "/application" in (page.url or "").lower())
+    )
     if not ya_en_formulario_ats:
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -2964,6 +2975,12 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
 
     # PASO 3: Rellenar formulario (incluyendo asistente multipaso LinkedIn si aplica)
     qa_list = await avanzar_wizard_linkedin_si_existe(page, empresa, titulo)
+    try:
+        bt_post_wiz = (await page.inner_text("body") or "").lower()
+        if any(w in bt_post_wiz for w in FRASES_YA_POSTULADO):
+            return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado al rellenar)"
+    except Exception:
+        pass
     try:
         tuvo_modal = await page.locator("dialog[open], div.jobs-easy-apply-modal, form#formularioPreguntasOferta, .modal.show, .offcanvas.show").count() > 0
     except Exception:
@@ -3358,7 +3375,9 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                 if pg_cand.is_closed():
                     continue
                 cu = (pg_cand.url or "").lower()
-                if "myworkdayjobs.com" in cu and "/apply" in cu and (not emp_tok or emp_tok in cu) and any(tk in cu for tk in tit_toks[:3]):
+                es_workday_app = "myworkdayjobs.com" in cu and "/apply" in cu and (not emp_tok or emp_tok in cu) and any(tk in cu for tk in tit_toks[:3])
+                es_csod_app = "csod.com" in cu and "/application" in cu and (not emp_tok or emp_tok in cu)
+                if es_workday_app or es_csod_app:
                     page_reusada = pg_cand
                     break
             if page_reusada is not None:
