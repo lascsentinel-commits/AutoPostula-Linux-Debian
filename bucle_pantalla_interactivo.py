@@ -337,6 +337,21 @@ GLOBAL_BOT_CONTROL = {
     "empresa_actual": "",
 }
 
+BOT_OWNED_PAGES: set = set()
+
+
+async def _detectar_nueva_pestana_del_bot(tabs_antes: list, parent_page):
+    """Devuelve la nueva pestaña SOLO si fue abierta por `parent_page` (`opener == parent_page`) para no capturar pestañas del usuario."""
+    tabs_despues = [t for t in parent_page.context.pages if t not in tabs_antes]
+    for t in reversed(tabs_despues):
+        try:
+            if await t.opener() == parent_page:
+                BOT_OWNED_PAGES.add(t)
+                return t
+        except Exception:
+            pass
+    return None
+
 _WIDGET_JS = """
 (() => {
     if (window.top !== window.self) {
@@ -736,8 +751,11 @@ async def gestionar_limite_pestanas(browser, max_tabs: int | None = None, tabs_p
     ]
 
     evaluadas = []
+    BOT_OWNED_PAGES.difference_update({p for p in list(BOT_OWNED_PAGES) if p.is_closed()})
     for ctx in list(browser.contexts):
         for pg in list(ctx.pages):
+            if pg not in BOT_OWNED_PAGES:
+                continue
             u = (pg.url or "").lower()
             if not u.startswith("http") or any(k in u for k in keep_personal):
                 continue
@@ -1255,9 +1273,8 @@ async def manejar_redireccion_externa(page):
             pass
 
         # Si abrió una nueva pestaña tras pulsar Entendido/Continuar, cerrar la intermedia y cambiar el foco del bot hacia ella
-        tabs_despues = list(page.context.pages)
-        if len(tabs_despues) > len(tabs_antes):
-            nueva_tab = [t for t in tabs_despues if t not in tabs_antes][-1]
+        nueva_tab = await _detectar_nueva_pestana_del_bot(tabs_antes, page)
+        if nueva_tab is not None:
             print(f"🌐 Cambiando a nueva pestaña externa: {nueva_tab.url}")
             try:
                 await nueva_tab.wait_for_load_state("domcontentloaded", timeout=15000)
@@ -1370,9 +1387,8 @@ async def manejar_redireccion_externa(page):
                 except Exception:
                     pass
 
-            tabs_cta_despues = list(page.context.pages)
-            if len(tabs_cta_despues) > len(tabs_cta_antes):
-                nueva_tab = [t for t in tabs_cta_despues if t not in tabs_cta_antes][-1]
+            nueva_tab = await _detectar_nueva_pestana_del_bot(tabs_cta_antes, page)
+            if nueva_tab is not None:
                 try:
                     await nueva_tab.wait_for_load_state("domcontentloaded", timeout=15000)
                 except Exception:
@@ -1467,9 +1483,8 @@ async def manejar_autenticacion_portal(page, empresa: str = "", solo_auto: bool 
                     await loc.scroll_into_view_if_needed()
                     await loc.click(timeout=5000)
                     await asyncio.sleep(4.0)
-                    tabs_despues = list(page.context.pages)
-                    if len(tabs_despues) > len(tabs_antes):
-                        pop = [t for t in tabs_despues if t not in tabs_antes][-1]
+                    pop = await _detectar_nueva_pestana_del_bot(tabs_antes, page)
+                    if pop is not None:
                         try:
                             await pop.wait_for_load_state("domcontentloaded", timeout=12000)
                         except Exception:
@@ -2579,9 +2594,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     await asyncio.sleep(2.5)
 
     # Detectar si el clic abrió una pestaña externa nueva (ej: LinkedIn 'Solicitar' en el sitio de la empresa)
-    tabs_despues = list(page.context.pages)
-    if len(tabs_despues) > len(tabs_antes):
-        nueva_tab = [t for t in tabs_despues if t not in tabs_antes][-1]
+    nueva_tab = await _detectar_nueva_pestana_del_bot(tabs_antes, page)
+    if nueva_tab is not None:
         print(f"🌐 Detectada nueva pestaña externa abierta: {nueva_tab.url}")
         try:
             await nueva_tab.wait_for_load_state("domcontentloaded", timeout=15000)
@@ -3008,6 +3022,7 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
             print(f"\n>>> [{i}/{total}] Procesando oferta #{of_id}: {empresa} - {titulo} ({portal})")
             await gestionar_limite_pestanas(browser, max(0, GLOBAL_BOT_CONTROL["max_tabs"] - 1))
             page = await ctx.new_page()
+            BOT_OWNED_PAGES.add(page)
             tabs_oferta = [page]
 
             try:
