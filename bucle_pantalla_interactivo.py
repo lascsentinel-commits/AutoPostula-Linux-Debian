@@ -975,6 +975,14 @@ async def pulsar_primer_postula(page) -> bool:
         "button:has-text('Postularme')",
         "a:has-text('Postularme')",
         "button.primary-btn:has-text('Postular')",
+        "button:has-text('Postularse')",
+        "a:has-text('Postularse')",
+        "a:has-text('POSTULAR A ESTA VACANTE')",
+        "button:has-text('POSTULAR A ESTA VACANTE')",
+        "a:has-text('APLICAR A ESTE PROCESO')",
+        "button:has-text('APLICAR A ESTE PROCESO')",
+        "a:has-text('Postúlate Ahora')",
+        "button:has-text('Postúlate Ahora')",
         "button:has-text('Postular')",
         "a:has-text('Postular')",
         "a:has-text('Postula fácil')",
@@ -993,12 +1001,12 @@ async def pulsar_primer_postula(page) -> bool:
         for loc in locs:
             try:
                 if await loc.is_visible():
-                    # Evitar falsos positivos en tarjetas recomendadas, promociones o marketplace comercial
+                    # Evitar falsos positivos en tarjetas recomendadas, navegación, soporte o marketplace comercial
                     es_invalido = await loc.evaluate('''el => {
-                        if (el.closest('.job-card-container, .jobs-similar-jobs, aside, footer, #autopostula-root-container')) return true;
+                        if (el.closest('.job-card-container, .jobs-similar-jobs, aside, footer, nav, header, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden="true"]')) return true;
                         const href = (el.getAttribute('href') || '').toLowerCase();
                         const txt = (el.innerText || '').toLowerCase();
-                        const bad = ['service-marketplace', 'careercoaching', 'premium', 'learning', 'pricing', 'checkout', 'curso', 'coaching', 'comprar', 'salarios'];
+                        const bad = ['service-marketplace', 'careercoaching', 'premium', 'learning', 'pricing', 'checkout', 'curso', 'coaching', 'comprar', 'salarios', '/messaging/'];
                         return bad.some(b => href.includes(b) || txt.includes(b));
                     }''')
                     if es_invalido:
@@ -1013,15 +1021,22 @@ async def pulsar_primer_postula(page) -> bool:
                 pass
 
     return await page.evaluate('''() => {
+        const isLinkedin = location.hostname.includes('linkedin.com');
         const btns = Array.from(document.querySelectorAll('button, a.btn, a')).filter(el => {
-            if (el.closest('.job-card-container, .jobs-similar-jobs, aside, footer, #autopostula-root-container')) return false;
+            if (el.closest('.job-card-container, .jobs-similar-jobs, aside, footer, nav, header, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden="true"]')) return false;
+            if (isLinkedin && el.closest('ul')) return false;
             const href = (el.getAttribute('href') || '').toLowerCase();
-            if (['service-marketplace', 'careercoaching', 'premium', 'learning', 'pricing', 'checkout'].some(b => href.includes(b))) return false;
+            if (['service-marketplace', 'careercoaching', 'premium', 'learning', 'pricing', 'checkout', '/messaging/'].some(b => href.includes(b))) return false;
             const txt = (el.innerText || el.textContent || "").trim().toLowerCase();
             const aria = (el.getAttribute('aria-label') || "").toLowerCase();
             return (
-                txt.includes('postula') ||
-                txt.includes('postular') ||
+                txt === 'postular' ||
+                txt === 'postularme' ||
+                txt === 'postularse' ||
+                txt.includes('postula fácil') ||
+                txt.includes('postular a esta vacante') ||
+                txt.includes('aplicar a este proceso') ||
+                txt.includes('postúlate ahora') ||
                 txt.includes('solicitud sencilla') ||
                 txt === 'solicitar' ||
                 aria.includes('solicitud sencilla') ||
@@ -1057,6 +1072,8 @@ async def pulsar_segundo_postular(page) -> bool:
     selectores_finales = [
         "dialog[open] button:has-text('Enviar solicitud')",
         "dialog[open] button:has-text('Submit application')",
+        "div[role='dialog'] button:has-text('Enviar solicitud')",
+        "div.jobs-easy-apply-modal button:has-text('Enviar solicitud')",
         "button:has-text('Enviar solicitud')",
         "button#postulation-questions",
         "#form-postulation-questions button[type='submit']",
@@ -1067,17 +1084,26 @@ async def pulsar_segundo_postular(page) -> bool:
         ".modal.show button:has-text('Postular')",
         "button:has-text('Enviar postulación')",
         "button:has-text('Confirmar postulación')",
+        "button:has-text('Finalizar postulación')",
         "#btnKiller",
-        "input[type='submit'][value*='Enviar']",
+        "input[type='submit'][value*='Enviar' i]",
         "button:has-text('Enviar')",
         "button:has-text('Responder')",
-        "button.primary-btn",
+        "button.primary-btn:has-text('Continuar')",
     ]
     for sel in selectores_finales:
         locs = await page.locator(sel).all()
         for loc in locs:
             try:
                 if await loc.is_visible():
+                    es_ajeno = await loc.evaluate('''el => {
+                        if (el.closest('#autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden="true"], header, nav, footer')) return true;
+                        const frm = el.closest('form');
+                        if (frm && frm.querySelector('#supportTextfield, [name*="support" i], [id*="support" i]')) return true;
+                        return false;
+                    }''')
+                    if es_ajeno:
+                        continue
                     await loc.evaluate("el => { el.removeAttribute('disabled'); el.removeAttribute('aria-disabled'); el.classList.remove('boton-deshabilitado'); }")
                     await loc.scroll_into_view_if_needed()
                     try:
@@ -1089,9 +1115,12 @@ async def pulsar_segundo_postular(page) -> bool:
                 pass
 
     return await page.evaluate('''() => {
-        const btns = Array.from(document.querySelectorAll('button, a.btn, input[type=\"submit\"]')).filter(b => {
+        const btns = Array.from(document.querySelectorAll('button, a.btn, input[type=\\\"submit\\\"]')).filter(b => {
+            if (b.closest('#autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden="true"], header, nav, footer')) return false;
+            const frm = b.closest('form');
+            if (frm && frm.querySelector('#supportTextfield, [name*="support" i], [id*="support" i]')) return false;
             const t = (b.innerText || b.value || "").trim().toLowerCase();
-            return (t === 'postular' || t.includes('enviar solicitud') || t.includes('enviar postulación') || t === 'enviar' || t.includes('postular') || t.includes('finalizar') || t.includes('submit') || t.includes('responder')) && b.offsetParent !== null;
+            return (t === 'postular' || t.includes('enviar solicitud') || t.includes('enviar postulación') || t === 'enviar' || t.includes('finalizar') || t === 'submit application' || t === 'responder') && b.offsetParent !== null;
         });
         if (btns.length > 0) {
             btns[0].removeAttribute('disabled');
@@ -1156,8 +1185,8 @@ def _cargar_perfil_usuario() -> dict:
 
 
 async def manejar_redireccion_externa(page):
-    """Detecta avisos ('Entendido' / 'Ya has ingresado...') y botones CTA externos ('Solicitar ahora') siguiendo nuevas pestañas."""
-    for ronda in range(2):
+    """Detecta avisos ('Entendido' / 'Ya has ingresado...') y botones CTA externos ('Solicitar ahora' / 'Postularse' / 'APLICAR A ESTE PROCESO') siguiendo nuevas pestañas."""
+    for ronda in range(3):
         tabs_antes = list(page.context.pages)
         clic_redir = False
 
@@ -1203,10 +1232,32 @@ async def manejar_redireccion_externa(page):
             await asyncio.sleep(2.0)
             await inyectar_boton_flotante_control(page)
 
-        # 2. En portales ATS externos (CSOD, Workday, AIRA, Buk, Greenhouse), pulsar 'Solicitar ahora' / 'Postular ahora' / 'Apply now'
-        es_portal_principal = any(dom in page.url.lower() for dom in ["firstjob.me", "trabajando.cl", "laborum.cl", "duoclaboral.cl", "computrabajo", "chiletrabajos"])
+        # 1.5 Si quedó abierto el dropdown de Pandape ('APLICAR A ESTE PROCESO'), elegir 'Redactar currículum' o 'Computrabajo' (/ApplyCT/)
+        if "pandape" in page.url.lower():
+            try:
+                dd_item = page.locator(".dropdown-menu.show a[href*='ApplyCT'], .dropdown-menu.show a:has-text('Redactar currículum')").first
+                if await dd_item.count() > 0 and await dd_item.is_visible():
+                    txt_dd = (await dd_item.inner_text() or "").strip()
+                    print(f"🚀 Pandape: eligiendo '{txt_dd}' del menú de postulación...")
+                    await dd_item.click(timeout=5000)
+                    clic_redir = True
+                    await asyncio.sleep(3.0)
+            except Exception:
+                pass
+
+        # 2. En portales ATS externos (CSOD, Workday, AIRA, Buk, Greenhouse, HiringRoom, Pandape, TrabajaEnElChile), pulsar el botón CTA
+        u_low = page.url.lower()
+        es_portal_principal = any(dom in u_low for dom in ["firstjob.me", "trabajando.cl", "laborum.cl", "duoclaboral.cl", "computrabajo", "chiletrabajos"]) and ("pandape" not in u_low)
         if not es_portal_principal or ronda == 1:
             selectores_cta_ext = [
+                "a:has-text('POSTULAR A ESTA VACANTE')",
+                "button:has-text('POSTULAR A ESTA VACANTE')",
+                "a:has-text('Postularse')",
+                "button:has-text('Postularse')",
+                "a:has-text('APLICAR A ESTE PROCESO')",
+                "button:has-text('APLICAR A ESTE PROCESO')",
+                "a:has-text('Postúlate Ahora')",
+                "button:has-text('Postúlate Ahora')",
                 "button:has-text('Solicitar ahora')",
                 "a:has-text('Solicitar ahora')",
                 "button:has-text('Postular ahora')",
@@ -1219,18 +1270,32 @@ async def manejar_redireccion_externa(page):
             tabs_cta_antes = list(page.context.pages)
             for sel in selectores_cta_ext:
                 try:
-                    loc = page.locator(sel).first
-                    if await loc.count() > 0 and await loc.is_visible():
-                        # Evitar repetir clic si ya estamos dentro de un formulario activo (/application o con inputs)
-                        ya_en_form = await page.locator("input[type='email']:visible, input[type='file'], input[name*='name']:visible").count() > 0
-                        if ya_en_form:
+                    locs = await page.locator(sel).all()
+                    for loc in locs:
+                        if await loc.is_visible():
+                            en_zona_ajena = await loc.evaluate("el => !!(el.closest('header, nav, footer, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden=\"true\"]'))")
+                            if en_zona_ajena:
+                                continue
+                            # Evitar repetir clic si ya estamos dentro de un formulario activo (/application o con inputs)
+                            ya_en_form = await page.locator("input[type='email']:visible, input[type='file'], input[type='password']:visible, input[name*='name']:visible").count() > 0
+                            if ya_en_form:
+                                break
+                            txt_cta = (await loc.inner_text() or "").strip()
+                            print(f"🚀 Portal externo detectado. Pulsando '{txt_cta}' para abrir formulario...")
+                            await loc.scroll_into_view_if_needed()
+                            await loc.click(timeout=5000)
+                            clic_redir = True
+                            await asyncio.sleep(2.5)
+                            # Si abrió dropdown de Pandape, seleccionar de inmediato Redactar currículum (/ApplyCT/)
+                            if "pandape" in page.url.lower():
+                                dd_item = page.locator(".dropdown-menu.show a[href*='ApplyCT'], .dropdown-menu.show a:has-text('Redactar currículum')").first
+                                if await dd_item.count() > 0 and await dd_item.is_visible():
+                                    txt_dd = (await dd_item.inner_text() or "").strip()
+                                    print(f"🚀 Pandape: eligiendo '{txt_dd}' tras abrir menú...")
+                                    await dd_item.click(timeout=5000)
+                                    await asyncio.sleep(3.0)
                             break
-                        txt_cta = (await loc.inner_text() or "").strip()
-                        print(f"🚀 Portal externo detectado. Pulsando '{txt_cta}' para abrir formulario...")
-                        await loc.scroll_into_view_if_needed()
-                        await loc.click(timeout=5000)
-                        clic_redir = True
-                        await asyncio.sleep(3.5)
+                    if clic_redir:
                         break
                 except Exception:
                     pass
@@ -1622,8 +1687,11 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
                 resp = resp[:max_len]
 
             await ta.scroll_into_view_if_needed(timeout=3000)
-            await ta.click(timeout=3500)
-            await ta.fill(resp, timeout=3500)
+            try:
+                await ta.click(timeout=1500)
+            except Exception:
+                await ta.evaluate("el => el.focus()")
+            await ta.fill(resp, timeout=3500, force=True)
             await ta.evaluate('''(el, payload) => {
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1796,18 +1864,20 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
 
 
 async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> list[dict]:
-    """Completa formularios de 1 o múltiples pasos en LinkedIn Easy Apply (<dialog open> o role=dialog) y portales ATS externos (CSOD, AIRA, Buk, Workday, etc.), rellenando datos personales, CV PDF y preguntas."""
+    """Completa formularios de 1 o múltiples pasos en LinkedIn Easy Apply (<dialog open> o role=dialog) y portales ATS externos (CSOD, AIRA, Buk, Workday, Pandape, etc.), rellenando datos personales, CV PDF y preguntas."""
     qa_acumulada = []
-    sel_dlg = "dialog[open], div.jobs-easy-apply-modal, div[role='dialog']:has-text('Enviar solicitud'), div[role='dialog']:has-text('Siguiente'), div[role='dialog']:has-text('Revisar')"
+    sel_dlg = "dialog[open], div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role='dialog']:has-text('Enviar solicitud'), div[role='dialog']:has-text('Siguiente'), div[role='dialog']:has-text('Revisar')"
     try:
         tiene_dlg = await page.locator(sel_dlg).count() > 0
     except Exception:
         tiene_dlg = False
 
     url_low = page.url.lower()
-    es_portal_nativo = any(dom in url_low for dom in ["firstjob.me", "trabajando.cl", "laborum.cl", "duoclaboral.cl", "computrabajo", "chiletrabajos", "serviciocivil.cl"])
+    es_portal_nativo = any(dom in url_low for dom in ["firstjob.me", "trabajando.cl", "laborum.cl", "duoclaboral.cl", "computrabajo", "chiletrabajos", "serviciocivil.cl"]) and ("pandape" not in url_low)
 
-    if not tiene_dlg and es_portal_nativo:
+    if not tiene_dlg and (es_portal_nativo or "linkedin.com" in url_low):
+        if not es_portal_nativo:
+            return qa_acumulada
         await autocompletar_datos_personales_y_cv(page)
         return await rellenar_formulario_actual(page, empresa, titulo)
 
@@ -1824,26 +1894,41 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
             sel_enviar = "dialog[open] button:has-text('Enviar solicitud'), dialog[open] button:has-text('Submit application'), div[role='dialog'] button:has-text('Enviar solicitud'), .jobs-easy-apply-modal button:has-text('Enviar solicitud')"
             sel_avanzar = "dialog[open] button:has-text('Revisar'), dialog[open] button:has-text('Siguiente'), dialog[open] button:has-text('Next'), dialog[open] button:has-text('Review'), div[role='dialog'] button:has-text('Revisar'), div[role='dialog'] button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Siguiente'), .jobs-easy-apply-modal button:has-text('Revisar')"
         else:
-            sel_enviar = "button:has-text('Enviar solicitud'), button:has-text('Enviar postulación'), button:has-text('Finalizar postulación'), button:has-text('Submit application'), button:text-is('Enviar'), input[type='submit'][value*='Enviar']"
-            sel_avanzar = "button:has-text('Siguiente'), button:has-text('Guardar y continuar'), button:has-text('Continuar'), button:has-text('Next'), button:has-text('Continue'), button:has-text('Revisar')"
+            sel_enviar = "button:has-text('Enviar solicitud'), button:has-text('Enviar postulación'), button:has-text('Finalizar postulación'), button:has-text('Submit application'), button:text-is('Enviar'), input[type='submit'][value*='Enviar' i]"
+            sel_avanzar = "button:has-text('Siguiente'), button:has-text('Guardar y continuar'), button:has-text('Continuar'), input[type='submit'][value*='Continuar' i], button:has-text('Next'), button:has-text('Continue'), button:has-text('Revisar')"
 
         # ¿Ya estamos en el paso final?
         try:
-            btn_enviar = page.locator(sel_enviar).first
-            if await btn_enviar.count() > 0 and await btn_enviar.is_visible():
-                print(f"✅ Asistente ({modo}) llegó al paso final de envío en paso {paso}.")
+            locs_env = await page.locator(sel_enviar).all()
+            encontro_env = False
+            for loc_e in locs_env:
+                if await loc_e.is_visible():
+                    es_ajeno = await loc_e.evaluate('''el => {
+                        if (el.closest('header, nav, footer, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden="true"]')) return true;
+                        const frm = el.closest('form');
+                        return !!(frm && frm.querySelector('#supportTextfield, [name*="support" i], [id*="support" i]'));
+                    }''')
+                    if not es_ajeno:
+                        print(f"✅ Asistente ({modo}) llegó al paso final de envío en paso {paso}.")
+                        encontro_env = True
+                        break
+            if encontro_env:
                 break
         except Exception:
             pass
 
         # Si hay botón de siguiente paso y aún no es el envío final, avanzarlo
         try:
-            btn_avanzar = page.locator(sel_avanzar).first
-            if await btn_avanzar.count() > 0 and await btn_avanzar.is_visible():
-                en_nav = await btn_avanzar.evaluate("el => !!(el.closest('header') || el.closest('nav') || el.closest('#autopostula-root-container'))")
-                if en_nav:
-                    break
-                lbl_btn = (await btn_avanzar.inner_text() or "").strip()
+            locs_av = await page.locator(sel_avanzar).all()
+            btn_avanzar = None
+            for cand_av in locs_av:
+                if await cand_av.is_visible():
+                    es_ajeno = await cand_av.evaluate("el => !!(el.closest('header, nav, footer, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden=\"true\"]'))")
+                    if not es_ajeno:
+                        btn_avanzar = cand_av
+                        break
+            if btn_avanzar is not None:
+                lbl_btn = (await btn_avanzar.inner_text() or await btn_avanzar.get_attribute("value") or "").strip()
                 print(f"➡️  Paso {paso} ({modo}) completado. Pulsando '{lbl_btn}'...")
                 url_antes = page.url
                 await btn_avanzar.scroll_into_view_if_needed()
@@ -2030,7 +2115,11 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
 
     # Comprobar si ya está postulado o cerrada
     body_text = (await page.inner_text("body") or "").lower()
-    if any(w in body_text for w in ["ya te has postulado", "ya has postulado", "ya estás postulado", "ya postulaste", "postulación enviada"]):
+    if any(w in body_text for w in [
+        "ya te has postulado", "ya has postulado", "ya estás postulado",
+        "ya postulaste", "postulación enviada", "solicitud enviada",
+        "candidatura enviada", "postulación recibida"
+    ]):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta"
 
     if any(w in body_text for w in FRASES_CERRADA):
@@ -2088,11 +2177,29 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if es_pagina_comercial_no_laboral(page.url, body_tras_clic):
         print(f"⚠️  Se detectó redirección comercial o no laboral ({page.url[:70]}). Cerrando sin postular.")
         return "cerrada", "Redirigió a página comercial / publicidad (no es oferta laboral)"
-    if any(w in body_tras_clic for w in ["ya te postulaste", "ya te has postulado", "ya has postulado", "ya estás postulado", "ya postulaste", "postulación enviada"]):
+    if any(w in body_tras_clic for w in [
+        "ya te postulaste", "ya te has postulado", "ya has postulado",
+        "ya estás postulado", "ya postulaste", "postulación enviada",
+        "solicitud enviada", "candidatura enviada", "postulación recibida"
+    ]):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras clic inicial)"
 
     if any(w in body_tras_clic for w in FRASES_CERRADA):
         return "cerrada", "Oferta cerrada o expirada en el portal (detectado tras clic inicial)"
+
+    # Comprobar si el portal externo exige iniciar sesión / cuenta o presenta CAPTCHA antibot (Cloudflare Turnstile / reCAPTCHA)
+    diag_bloqueo = await page.evaluate(r'''() => {
+        const hasPass = Array.from(document.querySelectorAll('input[type="password"]')).some(e => e.offsetParent !== null);
+        const editableNoLogin = Array.from(document.querySelectorAll('textarea, input[type="tel"], input[type="file"]')).some(e => e.offsetParent !== null && !e.readOnly && !e.disabled);
+        const hasCaptchaFrame = Array.from(document.querySelectorAll('iframe')).some(f => /turnstile|recaptcha|hcaptcha|challenges\.cloudflare/i.test(f.src || ''));
+        return {hasPass, editableNoLogin, hasCaptchaFrame};
+    }''')
+    if diag_bloqueo.get("hasPass") and not diag_bloqueo.get("editableNoLogin") and any(w in body_tras_clic for w in ["iniciar sesión", "inicio de sesión", "crear cuenta", "registrarse", "sign in", "create account", "ingresar a tu cuenta"]):
+        print(f"🔑 Portal externo requiere inicio de sesión o registro manual ({page.url[:70]}). Saltando sin esperar 30s.")
+        return "requiere_login", f"Portal externo exige inicio de sesión manual: {page.url}"
+    if diag_bloqueo.get("hasCaptchaFrame") or any(w in body_tras_clic for w in ["verify you are human", "no soy un robot"]):
+        print(f"🛡️ Portal externo bloqueado por verificación antibot/CAPTCHA ({page.url[:70]}). Respetando política sin automatizar CAPTCHA.")
+        return "captcha_antibot", f"Portal externo requiere verificación humana / CAPTCHA manual: {page.url}"
 
     # Verificar parada o pausa tras clic inicial
     st = await comprobar_pausa_y_parada(page)
@@ -2505,6 +2612,16 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                         await pg_o.close()
                     except Exception:
                         pass
+            elif res_tipo in ["requiere_login", "captcha_antibot"]:
+                nuevo_estado = "🔑 Requiere Login Manual" if res_tipo == "requiere_login" else "🛡️ Captcha / Verificación Manual"
+                c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", (nuevo_estado, msg, of_id))
+                conn.commit()
+                hablar(f"El portal de {empresa} exige inicio de sesión o verificación humana; guardado en el panel para acceso manual.")
+                for pg_o in tabs_oferta:
+                    try:
+                        await pg_o.close()
+                    except Exception:
+                        pass
             else:
                 c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Revisión en pantalla] {msg}", of_id))
                 conn.commit()
@@ -2515,7 +2632,7 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                 # NO cerrar ninguna pestaña de la oferta sin confirmación de éxito
 
             conn.close()
-            await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas=set(tabs_oferta) if res_tipo not in ["ok", "ya_postulado", "cerrada", "descartada_desc"] else None)
+            await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas=set(tabs_oferta) if res_tipo not in ["ok", "ya_postulado", "cerrada", "descartada_desc", "requiere_login", "captcha_antibot"] else None)
             await asyncio.sleep(2.0)
 
     await desactivar_widgets_navegador(browser)

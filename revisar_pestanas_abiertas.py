@@ -85,8 +85,8 @@ def diagnosticar_bloqueo(url: str, title: str, diag: dict) -> tuple[str, str]:
     if "el empleo se ha movido a en curso dentro de clics en la solicitud" in bt and not diag.get("has_modal"):
         return "pestana_origen_linkedin", "Pestaña intermedia de LinkedIn tras abrir sitio externo ('Clics en la solicitud')."
 
-    if any(w in bt for w in ["recaptcha", "no soy un robot", "cloudflare", "verify you are human", "hcaptcha"]):
-        return "captcha_antibot", "Bloqueada por CAPTCHA o verificación humana antibot."
+    if diag.get("has_captcha") or any(w in bt for w in ["recaptcha", "no soy un robot", "cloudflare", "verify you are human", "hcaptcha"]):
+        return "captcha_antibot", "Bloqueada por CAPTCHA o verificación humana antibot (Turnstile / reCAPTCHA)."
 
     if diag.get("has_password") or any(w in bt for w in ["iniciar sesión", "inicio de sesión", "crear cuenta", "registrarse", "acceder a tu solicitud", "sign in", "create account"]):
         if not diag.get("has_send_btn"):
@@ -223,25 +223,27 @@ async def auditar_y_postular_pestanas(max_mantener: int = 4, auto_enviar: bool =
             except Exception:
                 pass
 
-            # Verificar si tras el clic cayó en login / HiringRoom / spam / cerrada
+            # Verificar si tras el clic cayó en login / Turnstile / HiringRoom / spam / cerrada
             try:
                 diag_mid = await active_pg.evaluate(r'''() => {
                     const bt = (document.body?.innerText || '').toLowerCase();
-                    const hasModal = document.querySelectorAll('dialog[open], div.jobs-easy-apply-modal, #form-postulation-questions, form#formularioPreguntasOferta').length > 0;
+                    const hasModal = document.querySelectorAll('dialog[open], div.jobs-easy-apply-modal, div[data-test-modal], #form-postulation-questions, form#formularioPreguntasOferta').length > 0;
                     const hasPass = Array.from(document.querySelectorAll('input[type="password"]')).some(e => e.offsetParent !== null);
+                    const hasCaptcha = Array.from(document.querySelectorAll('iframe')).some(f => /turnstile|recaptcha|hcaptcha|challenges\.cloudflare/i.test(f.src || ''));
                     const editable = Array.from(document.querySelectorAll('textarea, input[type="text"]:not([id*="search"]):not([id*="react-select"]), input[type="email"]')).filter(e => e.offsetParent !== null && !e.readOnly && !e.disabled).length;
                     const sendBtns = Array.from(document.querySelectorAll('button, input[type="submit"]')).filter(e => {
                         if (e.offsetParent === null) return false;
+                        if (e.closest('#supportModal, .modal:not(.show), [aria-hidden="true"], header, nav, footer')) return false;
                         const t = (e.innerText || e.value || '').trim().toLowerCase();
                         return t === 'postular' || t.includes('enviar solicitud') || t.includes('enviar postulación') || t === 'enviar' || t === 'postularme' || t.includes('finalizar postulación');
                     }).length;
-                    return { body_low: bt.slice(0, 5000), has_modal: hasModal, has_password: hasPass, editable_inputs: editable, has_send_btn: sendBtns > 0 };
+                    return { body_low: bt.slice(0, 5000), has_modal: hasModal, has_password: hasPass, has_captcha: hasCaptcha, editable_inputs: editable, has_send_btn: sendBtns > 0 };
                 }''')
             except Exception:
-                diag_mid = {"body_low": "", "has_modal": False, "has_password": False, "editable_inputs": 0, "has_send_btn": False}
+                diag_mid = {"body_low": "", "has_modal": False, "has_password": False, "has_captcha": False, "editable_inputs": 0, "has_send_btn": False}
 
-            # Si aún no hay botón de envío real ni formulario desbloqueado (por login wall / Workday / HiringRoom auth)
-            if diag_mid["has_password"] or (not diag_mid["has_send_btn"] and diag_mid["editable_inputs"] == 0):
+            # Si aún no hay botón de envío real ni formulario desbloqueado (por login wall / Workday / HiringRoom Turnstile / captcha)
+            if diag_mid.get("has_captcha") or diag_mid["has_password"] or (not diag_mid["has_send_btn"] and diag_mid["editable_inputs"] == 0):
                 cod, mot = diagnosticar_bloqueo(active_pg.url, title, diag_mid)
                 print(f"❌ No postulable ({cod}): {mot} -> Cerrando pestaña.")
                 resultados.append({"url": active_pg.url, "titulo": title, "estado": "no_postulable_cerrada", "codigo": cod, "motivo": mot})
