@@ -3008,9 +3008,47 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                     (nuevo_estado, now_str, f"[CV Maestro Duoc] {msg}", of_id)
                 )
                 conn.commit()
-                hablar(f"Postulación a {empresa} confirmada con éxito visible en pantalla.")
-                print(f"👁️ Manteniendo pantalla visible 4 segundos antes de cerrar pestaña confirmada...")
-                await asyncio.sleep(4.0)
+                espera_post = max(0, int(GLOBAL_BOT_CONTROL.get("segundos", segundos_revision))) if res_tipo == "ok" else 4
+                if res_tipo == "ok" and espera_post > 5:
+                    hablar(f"Postulación a {empresa} confirmada en pantalla. Esperando {espera_post} segundos para revisar; puedes pausar y al reanudar pasará a la siguiente.")
+                else:
+                    hablar(f"Postulación a {empresa} confirmada con éxito visible en pantalla.")
+
+                post_elapsed = 0.0
+                post_pausado_prev = False
+                GLOBAL_BOT_CONTROL["skip_wait"] = False
+                while post_elapsed < espera_post:
+                    await sincronizar_widgets_navegador(browser)
+                    if GLOBAL_BOT_CONTROL["stop"]:
+                        print("\n🛑 Bucle detenido por completo por el usuario en verificación post-envío.")
+                        hablar("Bot detenido por completo a solicitud del usuario.", final=True)
+                        conn.close()
+                        await desactivar_widgets_navegador(browser)
+                        return
+                    if GLOBAL_BOT_CONTROL["paused"]:
+                        if not post_pausado_prev:
+                            print("\n⏸️  PAUSADO tras confirmar postulación. Revisa en pantalla y pulsa Reanudar para cerrar y pasar a la siguiente.")
+                            hablar("Pausado tras confirmar el envío. Presiona reanudar cuando quieras cerrar y seguir.")
+                            post_pausado_prev = True
+                            GLOBAL_BOT_CONTROL["timer_text"] = "PAUSA"
+                            await sincronizar_widgets_navegador(browser)
+                        await asyncio.sleep(0.5)
+                        continue
+                    if post_pausado_prev:
+                        print("\n▶️  Reanudado tras revisión: cerrando pestaña confirmada y pasando a la siguiente...")
+                        hablar("Cerrando y pasando a la siguiente oferta.")
+                        break
+                    if GLOBAL_BOT_CONTROL["skip_wait"]:
+                        GLOBAL_BOT_CONTROL["skip_wait"] = False
+                        print("\n🚀 Avance inmediato solicitado: cerrando pestaña confirmada...")
+                        break
+                    rest_post = max(0, int(espera_post - post_elapsed))
+                    GLOBAL_BOT_CONTROL["timer_text"] = f"OK {rest_post}s"
+                    await sincronizar_widgets_navegador(browser)
+                    print(f"\r👁️  Verificación post-envío: {rest_post:02d}s | [⏸️ Pausar | ▶️ Reanudar = Siguiente]...", end="", flush=True)
+                    await asyncio.sleep(0.5)
+                    post_elapsed += 0.5
+                print("")
                 for pg_o in tabs_oferta:
                     try:
                         await pg_o.close()
