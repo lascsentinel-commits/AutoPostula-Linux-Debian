@@ -47,6 +47,84 @@ from modules.auto_applier import (
 
 DAEMON_SCRIPT = os.path.join(BASE_DIR, "daemon_scheduler.py")
 PYTHON_BIN = sys.executable or "/usr/bin/python3"
+INVESTIGACIONES_DIR = os.path.join(BASE_DIR, "data", "investigaciones")
+
+
+def _disparar_investigacion(data: dict) -> dict:
+    """Guarda el contexto de la pestaña y la nota del usuario y lanza el Agente Investigador (agy) una sola vez por req_id."""
+    os.makedirs(INVESTIGACIONES_DIR, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    req_id = str(data.get("req_id") or f"inv_{ts}")
+    req_safe = "".join(c for c in req_id if c.isalnum() or c in ("_", "-"))[:60] or f"inv_{ts}"
+    report_path = os.path.join(INVESTIGACIONES_DIR, f"{req_safe}.json")
+    ultimo_path = os.path.join(INVESTIGACIONES_DIR, "ultimo.json")
+
+    if os.path.exists(report_path):
+        try:
+            with open(report_path, "r", encoding="utf-8") as fh:
+                return {"ok": True, "dedup": True, "report": json.load(fh)}
+        except Exception:
+            pass
+
+    note = (data.get("note") or "").strip()
+    url = (data.get("url") or "").strip()
+    report = {
+        "req_id": req_safe,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "status": "investigando",
+        "note": note,
+        "url": url,
+        "title": (data.get("title") or "").strip(),
+        "oferta_id": data.get("oferta_id"),
+        "empresa": data.get("empresa") or "",
+        "titulo": data.get("titulo") or "",
+        "portal": data.get("portal") or "",
+        "url_oferta": data.get("url_oferta") or "",
+        "errors": data.get("errors") or [],
+        "buttons": data.get("buttons") or [],
+        "inputs": data.get("inputs") or [],
+        "bodySnippet": (data.get("bodySnippet") or "")[:2200],
+        "report_path": report_path,
+    }
+    with open(report_path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, ensure_ascii=False, indent=2)
+    with open(ultimo_path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, ensure_ascii=False, indent=2)
+
+    agy_bin = "/home/dhamit/.local/bin/agy" if os.path.exists("/home/dhamit/.local/bin/agy") else "agy"
+    log_path = os.path.join(INVESTIGACIONES_DIR, f"{req_safe}.log")
+    res_path = os.path.join(INVESTIGACIONES_DIR, "ultimo_resultado.json")
+    prompt = (
+        f"Eres el Agente Investigador de AutoPostula llamado desde el botón flotante de Brave.\n"
+        f"Lee primero el archivo de contexto completo en: {report_path}\n"
+        f"Nota del usuario: {note or '(sin nota adicional, revisar por qué no se completó ni envió la postulación)'}\n"
+        f"URL activa reportada: {url}\n"
+        f"1) Conecta por CDP a Brave en http://127.0.0.1:9222 para inspeccionar el DOM real, errores, formularios, modales o botones bloqueados de esa pestaña.\n"
+        f"2) Identifica exactamente por qué no se ha postulado o qué campo/botón faltó, complétalo o corrige bucle_pantalla_interactivo.py (respaldando primero con /home/dhamit/Documentos/MYCreIAtedAPPs/.agents/scripts/backup_helper.py y validando con py_compile).\n"
+        f"3) Guarda el resumen JSON en {res_path} con claves req_id='{req_safe}', status='completado', summary, timestamp.\n"
+        f"4) Anuncia el hallazgo y resultado en voz alta ejecutando /home/dhamit/.local/bin/Di --final."
+    )
+    try:
+        di_bin = "/home/dhamit/.local/bin/Di"
+        if os.path.exists(di_bin):
+            p_di = subprocess.Popen([di_bin], stdin=subprocess.PIPE, text=True)
+            p_di.communicate(input=f"Agente investigador activado para {report['empresa'] or 'esta oferta'}. Ya recibí tu nota y estoy analizando la pestaña.")
+    except Exception:
+        pass
+    try:
+        with open(log_path, "w", encoding="utf-8") as log_f:
+            subprocess.Popen(
+                [agy_bin, "--dangerously-skip-permissions", "--mode", "accept-edits", "--add-dir", "/home/dhamit/Documentos/MYCreIAtedAPPs", "-p", prompt],
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                cwd=BASE_DIR,
+                start_new_session=True,
+            )
+        launched = True
+    except Exception as e:
+        launched = False
+        report["launch_error"] = str(e)
+    return {"ok": True, "launched": launched, "report": report}
 
 
 def is_daemon_running():
@@ -1425,9 +1503,17 @@ loadMemoria();
 
 
 class AutoPostulaHandler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
     def _send_json(self, payload, status=200):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -1474,6 +1560,19 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/logs":
             init_db()
             self._send_json(obtener_logs_scheduler(limit=30))
+        elif parsed.path == "/api/agente-investigador":
+            ult, res_ult = None, None
+            for p_src, k in [(os.path.join(INVESTIGACIONES_DIR, "ultimo.json"), "req"), (os.path.join(INVESTIGACIONES_DIR, "ultimo_resultado.json"), "res")]:
+                if os.path.exists(p_src):
+                    try:
+                        with open(p_src, "r", encoding="utf-8") as fh:
+                            if k == "req":
+                                ult = json.load(fh)
+                            else:
+                                res_ult = json.load(fh)
+                    except Exception:
+                        pass
+            self._send_json({"ok": True, "ultimo": ult, "resultado": res_ult})
         else:
             self.send_response(404)
             self.end_headers()
@@ -1607,6 +1706,14 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
             prox = calcular_proximo_horario(actual.get("horarios", "01:00, 04:00, 06:30, 08:00, 12:00, 14:00, 17:00, 22:00"))
             guardar_estado_scheduler(activo=nuevo, proximo_escaneo=prox)
             self._send_json({"ok": True, "activo": nuevo, "proximo_escaneo": prox})
+
+        elif parsed.path == "/api/agente-investigador":
+            try:
+                data = self._read_json()
+                resp = _disparar_investigacion(data)
+                self._send_json(resp)
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
 
         else:
             self.send_response(404)

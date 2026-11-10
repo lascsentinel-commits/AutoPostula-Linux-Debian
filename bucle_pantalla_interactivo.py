@@ -18,11 +18,13 @@ Flujo Completo:
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -352,6 +354,7 @@ GLOBAL_BOT_CONTROL = {
     "paused": False,
     "stop": False,
     "skip_wait": False,
+    "next_offer": False,
     "segundos": 30,
     "timer_text": "30s",
     "last_cmd_ts": 0,
@@ -360,12 +363,74 @@ GLOBAL_BOT_CONTROL = {
     "max_tabs": 4,
     "read_desc_now": False,
     "clean_tabs_now": False,
+    "open_prev_now": False,
+    "investigate_payload": None,
+    "inv_status": "",
     "desc_actual": "",
     "empresa_actual": "",
+    "oferta_actual": {},
 }
 
 BOT_OWNED_PAGES: set = set()
 TABS_PROTEGIDAS_MANUAL: set = set()
+HISTORIAL_OFERTAS: list[dict] = []
+
+
+def _registrar_historial_oferta(of: dict, url_real: str = ""):
+    """Guarda en memoria la secuencia de ofertas visitadas para poder volver con 'Link anterior'."""
+    if not of:
+        return
+    u = (url_real or of.get("url_oferta") or "").strip()
+    if not u.startswith("http"):
+        return
+    entry = {
+        "id": of.get("id"),
+        "empresa": of.get("empresa") or "Oferta",
+        "titulo": of.get("titulo") or "",
+        "portal": of.get("portal") or "",
+        "url_oferta": of.get("url_oferta") or u,
+        "url_real": u,
+    }
+    if HISTORIAL_OFERTAS and HISTORIAL_OFERTAS[-1].get("id") == entry["id"]:
+        HISTORIAL_OFERTAS[-1].update(entry)
+    else:
+        HISTORIAL_OFERTAS.append(entry)
+        if len(HISTORIAL_OFERTAS) > 30:
+            HISTORIAL_OFERTAS.pop(0)
+
+
+def _obtener_oferta_anterior() -> dict | None:
+    """Devuelve la oferta inmediatamente anterior a la actual (o la última procesada en BD si recién partió el bot)."""
+    cur_id = (GLOBAL_BOT_CONTROL.get("oferta_actual") or {}).get("id")
+    if len(HISTORIAL_OFERTAS) >= 2:
+        cand = HISTORIAL_OFERTAS[-2]
+        if cand.get("id") != cur_id:
+            return cand
+    for item in reversed(HISTORIAL_OFERTAS):
+        if item.get("id") != cur_id:
+            return item
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, empresa, titulo, portal, url_oferta
+            FROM postulaciones
+            WHERE id != ? AND url_oferta LIKE 'http%'
+              AND (fecha_postulacion IS NOT NULL OR estado LIKE '%Postulado%' OR estado LIKE '%Cerrada%' OR estado LIKE '%Descartada%')
+            ORDER BY COALESCE(fecha_postulacion, created_at) DESC, id DESC
+            LIMIT 1
+            """,
+            (cur_id or -1,),
+        ).fetchone()
+        conn.close()
+        if row:
+            d = dict(row)
+            d["url_real"] = d["url_oferta"]
+            return d
+    except Exception:
+        pass
+    return None
 
 
 async def _detectar_nueva_pestana_del_bot(tabs_antes: list, parent_page):
@@ -393,7 +458,7 @@ _WIDGET_JS = """
         }
         return;
     }
-    const WIDGET_VER = '4.3';
+    const WIDGET_VER = '4.4';
     window.__autopostula_widget_version = WIDGET_VER;
     if (window.__autopostula_interval && window.__autopostula_interval_ver !== WIDGET_VER) {
         clearInterval(window.__autopostula_interval);
@@ -407,6 +472,8 @@ _WIDGET_JS = """
     window.__autopostula_panel_open = window.__autopostula_panel_open !== undefined ? window.__autopostula_panel_open : false;
     window.__autopostula_leer_desc = window.__autopostula_leer_desc !== undefined ? window.__autopostula_leer_desc : false;
     window.__autopostula_max_tabs = window.__autopostula_max_tabs || 4;
+    window.__autopostula_inv_open = window.__autopostula_inv_open || false;
+    window.__autopostula_inv_status = window.__autopostula_inv_status || "";
     window.__autopostula_hovering = false;
 
     function pushCmd(action, value = null) {
@@ -432,8 +499,12 @@ _WIDGET_JS = """
         const modalTimer = document.getElementById('autopostula-modal-timer');
         const autoDescBtn = document.getElementById('autopostula-modal-autodesc');
         const maxTabsVal = document.getElementById('autopostula-max-tabs-val');
+        const invBox = document.getElementById('autopostula-inv-box');
+        const invStat = document.getElementById('autopostula-inv-status');
 
         if (maxTabsVal) maxTabsVal.innerText = String(window.__autopostula_max_tabs || 4);
+        if (invBox) invBox.style.setProperty('display', window.__autopostula_inv_open ? 'flex' : 'none', 'important');
+        if (invStat) invStat.innerText = window.__autopostula_inv_status || '';
         if (autoDescBtn) {
             const on = !!window.__autopostula_leer_desc;
             autoDescBtn.innerText = on ? '🔊 Lectura Auto Descripción (Edge-TTS): ON' : '🔇 Lectura Auto Descripción (Edge-TTS): OFF';
@@ -578,6 +649,27 @@ _WIDGET_JS = """
                     🚀 Enviar Postulación Ahora
                 </button>
 
+                <div style="display:flex; gap:6px;">
+                    <button id="autopostula-modal-prev" style="flex:1; background:#334155; border:1px solid rgba(255,255,255,0.2); border-radius:10px; color:#f8fafc; font-size:12px; font-weight:800; padding:7px 6px; cursor:pointer;">
+                        ⬅️ Link anterior
+                    </button>
+                    <button id="autopostula-modal-next" style="flex:1; background:#0369a1; border:1px solid rgba(56,189,248,0.45); border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:7px 6px; cursor:pointer;">
+                        ⏭️ Continuar siguiente
+                    </button>
+                </div>
+
+                <button id="autopostula-modal-investigar" style="background:linear-gradient(135deg,#7c3aed,#4f46e5); border:1px solid #a78bfa; border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:8px; cursor:pointer;">
+                    🕵️ Agente investigador
+                </button>
+
+                <div id="autopostula-inv-box" style="display:none; flex-direction:column; gap:6px; background:rgba(76,29,149,0.28); border:1px solid rgba(167,139,250,0.45); border-radius:10px; padding:8px;">
+                    <textarea id="autopostula-inv-note" rows="3" placeholder="Explícame qué ves o qué falta para postular..." style="width:100%; box-sizing:border-box; background:rgba(15,23,42,0.95); color:#f8fafc; border:1px solid rgba(148,163,184,0.45); border-radius:8px; padding:6px; font-size:12px; resize:vertical; font-family:inherit; user-select:text;"></textarea>
+                    <button id="autopostula-inv-send" style="background:#8b5cf6; border:none; border-radius:8px; color:#ffffff; font-size:12px; font-weight:800; padding:7px; cursor:pointer;">
+                        🚀 Enviar nota al Agente Investigador
+                    </button>
+                    <div id="autopostula-inv-status" style="font-size:11px; color:#ddd6fe; line-height:1.3;"></div>
+                </div>
+
                 <button id="autopostula-modal-memory" style="background:#6366f1; border:none; border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:7px; cursor:pointer;">
                     🧠 Ver / Editar Memoria (Q&A)
                 </button>
@@ -620,7 +712,9 @@ _WIDGET_JS = """
             });
             root.addEventListener('mouseleave', () => {
                 window.__autopostula_hovering = false;
-                if (window.__autopostula_panel_open) {
+                const ae = document.activeElement;
+                const typingInv = !!(ae && ae.id === 'autopostula-inv-note') || !!window.__autopostula_inv_open;
+                if (window.__autopostula_panel_open && !typingInv) {
                     leaveTimer = setTimeout(() => {
                         window.__autopostula_panel_open = false;
                         pushCmd('set_panel_open', false);
@@ -695,6 +789,72 @@ _WIDGET_JS = """
                 updateWidgetState();
             });
 
+            modal.querySelector('#autopostula-modal-prev')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                window.__autopostula_paused = true;
+                pushCmd('prev_link', true);
+                updateWidgetState();
+            });
+
+            modal.querySelector('#autopostula-modal-next')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                window.__autopostula_paused = false;
+                window.__autopostula_inv_open = false;
+                pushCmd('next_offer', true);
+                updateWidgetState();
+            });
+
+            modal.querySelector('#autopostula-modal-investigar')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                window.__autopostula_inv_open = !window.__autopostula_inv_open;
+                if (window.__autopostula_inv_open) {
+                    window.__autopostula_paused = true;
+                    pushCmd('pause', true);
+                    setTimeout(() => document.getElementById('autopostula-inv-note')?.focus(), 60);
+                }
+                updateWidgetState();
+            });
+
+            modal.querySelector('#autopostula-inv-send')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const noteEl = document.getElementById('autopostula-inv-note');
+                const noteTxt = (noteEl?.value || '').trim();
+                const errs = Array.from(document.querySelectorAll('[data-automation-id*="error"], [id*="error"], .invalid-feedback, .field-validation-error, [role="alert"], .text-danger'))
+                    .filter(el => el.offsetParent !== null && !el.closest('#autopostula-root-container'))
+                    .map(el => (el.innerText || '').trim()).filter(Boolean).slice(0, 12);
+                const btns = Array.from(document.querySelectorAll('button, a.btn, input[type="submit"], input[type="button"]'))
+                    .filter(el => el.offsetParent !== null && !el.closest('#autopostula-root-container, header, nav, footer'))
+                    .map(el => (el.innerText || el.value || '').trim()).filter(Boolean).slice(0, 15);
+                const inps = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea'))
+                    .filter(el => (el.offsetParent !== null || el.type === 'file') && !el.closest('#autopostula-root-container'))
+                    .map(el => ({
+                        tag: el.tagName, type: el.type || '', id: el.id || '', name: el.name || '',
+                        val: el.type === 'password' ? '***' : String(el.value || '').slice(0, 40)
+                    })).slice(0, 20);
+                const reqId = 'inv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+                const payload = {
+                    req_id: reqId,
+                    note: noteTxt,
+                    url: location.href,
+                    title: document.title,
+                    errors: errs,
+                    buttons: btns,
+                    inputs: inps,
+                    bodySnippet: (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, 1800)
+                };
+                window.__autopostula_paused = true;
+                window.__autopostula_inv_status = '⏳ Agente investigador analizando esta pestaña...';
+                updateWidgetState();
+                pushCmd('call_investigator', payload);
+                if (typeof window.__autopostula_host_cmd !== 'function') {
+                    fetch('http://localhost:8087/api/agente-investigador', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    }).catch(() => {});
+                }
+            });
+
             modal.querySelector('#autopostula-modal-memory')?.addEventListener('click', (e) => {
                 e.stopPropagation();
                 window.__autopostula_paused = true;
@@ -737,7 +897,12 @@ _WIDGET_JS = """
         window.__autopostula_segundos_revision = st.segundos || 30;
         window.__autopostula_leer_desc = !!st.leer_descripcion;
         window.__autopostula_max_tabs = st.max_tabs || 4;
-        if (typeof st.panel_open === 'boolean' && !window.__autopostula_hovering) {
+        if (typeof st.inv_status === 'string' && st.inv_status) {
+            window.__autopostula_inv_status = st.inv_status;
+        }
+        const ae = document.activeElement;
+        const typingInv = !!(ae && ae.id === 'autopostula-inv-note') || !!window.__autopostula_inv_open;
+        if (typeof st.panel_open === 'boolean' && !window.__autopostula_hovering && !typingInv) {
             window.__autopostula_panel_open = st.panel_open;
         }
         createOrAttachWidget();
@@ -874,6 +1039,17 @@ def _aplicar_comando_control(act: str, val=None):
         GLOBAL_BOT_CONTROL["clean_tabs_now"] = True
     elif act == "clean_tabs_now":
         GLOBAL_BOT_CONTROL["clean_tabs_now"] = True
+    elif act == "prev_link":
+        GLOBAL_BOT_CONTROL["paused"] = True
+        GLOBAL_BOT_CONTROL["open_prev_now"] = True
+    elif act == "next_offer":
+        GLOBAL_BOT_CONTROL["paused"] = False
+        GLOBAL_BOT_CONTROL["next_offer"] = True
+    elif act == "call_investigator" and isinstance(val, dict):
+        GLOBAL_BOT_CONTROL["paused"] = True
+        GLOBAL_BOT_CONTROL["timer_text"] = "INVESTIGA"
+        GLOBAL_BOT_CONTROL["inv_status"] = "⏳ Agente investigador analizando esta pestaña..."
+        GLOBAL_BOT_CONTROL["investigate_payload"] = val
 
 
 async def sincronizar_widgets_navegador(browser):
@@ -908,9 +1084,9 @@ async def sincronizar_widgets_navegador(browser):
                 return {
                     ready: (
                         typeof window.__autopostula_sync_state === 'function' &&
-                        window.__autopostula_widget_version === '4.3' &&
+                        window.__autopostula_widget_version === '4.4' &&
                         document.querySelectorAll('#autopostula-root-container').length === 1 &&
-                        !!document.getElementById('autopostula-modal-autodesc')
+                        !!document.getElementById('autopostula-modal-investigar')
                     ),
                     cmd
                 };
@@ -943,6 +1119,65 @@ async def sincronizar_widgets_navegador(browser):
         GLOBAL_BOT_CONTROL["clean_tabs_now"] = False
         await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"])
 
+    if GLOBAL_BOT_CONTROL["open_prev_now"]:
+        GLOBAL_BOT_CONTROL["open_prev_now"] = False
+        prev_of = _obtener_oferta_anterior()
+        if prev_of and prev_of.get("url_real"):
+            try:
+                ctx_b = browser.contexts[0]
+                prev_pg = await ctx_b.new_page()
+                BOT_OWNED_PAGES.add(prev_pg)
+                TABS_PROTEGIDAS_MANUAL.add(prev_pg)
+                await prev_pg.goto(prev_of["url_real"], wait_until="domcontentloaded", timeout=20000)
+                await prev_pg.bring_to_front()
+                await prev_pg.evaluate(_WIDGET_JS)
+                GLOBAL_BOT_CONTROL["timer_text"] = "LINK ANT."
+                emp_p = prev_of.get("empresa") or "la oferta anterior"
+                print(f"\n⬅️  Abriendo enlace anterior de {emp_p}: {prev_of['url_real']}")
+                hablar(f"Abriendo el enlace anterior de {emp_p} en una pestaña para que puedas revisarlo.")
+            except Exception as e:
+                print(f"Aviso abriendo link anterior: {e}")
+        else:
+            hablar("Todavía no hay una oferta anterior registrada en el historial.")
+
+    if GLOBAL_BOT_CONTROL["investigate_payload"]:
+        inv_pl = GLOBAL_BOT_CONTROL["investigate_payload"]
+        GLOBAL_BOT_CONTROL["investigate_payload"] = None
+        of_act = GLOBAL_BOT_CONTROL.get("oferta_actual") or {}
+        inv_pl.setdefault("oferta_id", of_act.get("id"))
+        inv_pl.setdefault("empresa", of_act.get("empresa") or "")
+        inv_pl.setdefault("titulo", of_act.get("titulo") or "")
+        inv_pl.setdefault("portal", of_act.get("portal") or "")
+        inv_pl.setdefault("url_oferta", of_act.get("url_oferta") or "")
+        for ctx_b in list(browser.contexts):
+            for pg_b in list(ctx_b.pages):
+                if (pg_b.url or "") == (inv_pl.get("url") or ""):
+                    TABS_PROTEGIDAS_MANUAL.add(pg_b)
+        def _post_inv(pl):
+            import urllib.request
+            try:
+                req = urllib.request.Request(
+                    "http://127.0.0.1:8087/api/agente-investigador",
+                    data=json.dumps(pl, ensure_ascii=False).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=8)
+            except Exception as ex:
+                print(f"Aviso llamando Agente Investigador: {ex}")
+        threading.Thread(target=_post_inv, args=(inv_pl,), daemon=True).start()
+        print(f"\n🕵️  Llamado Agente Investigador para #{inv_pl.get('oferta_id')} ({inv_pl.get('empresa')}) | Nota: {inv_pl.get('note', '')[:80]}")
+
+    res_inv_path = BASE_DIR / "data" / "investigaciones" / "ultimo_resultado.json"
+    if res_inv_path.exists():
+        try:
+            with open(res_inv_path, "r", encoding="utf-8") as fh_r:
+                rj = json.load(fh_r)
+            if rj.get("status") == "completado" and rj.get("summary"):
+                GLOBAL_BOT_CONTROL["inv_status"] = f"✅ {str(rj['summary'])[:140]}"
+        except Exception:
+            pass
+
     payload = {
         "paused": GLOBAL_BOT_CONTROL["paused"],
         "stop": GLOBAL_BOT_CONTROL["stop"],
@@ -951,6 +1186,7 @@ async def sincronizar_widgets_navegador(browser):
         "panel_open": GLOBAL_BOT_CONTROL["panel_open"],
         "leer_descripcion": GLOBAL_BOT_CONTROL["leer_descripcion"],
         "max_tabs": GLOBAL_BOT_CONTROL["max_tabs"],
+        "inv_status": GLOBAL_BOT_CONTROL["inv_status"],
     }
 
     async def _push_pg(pg):
@@ -1004,18 +1240,23 @@ async def comprobar_pausa_y_parada(page) -> str:
     if GLOBAL_BOT_CONTROL["stop"]:
         return "stop"
 
+    if GLOBAL_BOT_CONTROL["next_offer"]:
+        return "next"
+
     if GLOBAL_BOT_CONTROL["paused"]:
         GLOBAL_BOT_CONTROL["timer_text"] = "PAUSA"
         if browser:
             await sincronizar_widgets_navegador(browser)
         print("\n⏸️  BOT EN ESTADO PAUSADO por el usuario. Esperando reanudación...")
         hablar("Bot pausado. Esperando que presiones reanudar.")
-        while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"]:
+        while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"] and not GLOBAL_BOT_CONTROL["next_offer"]:
             await asyncio.sleep(0.4)
             if browser:
                 await sincronizar_widgets_navegador(browser)
         if GLOBAL_BOT_CONTROL["stop"]:
             return "stop"
+        if GLOBAL_BOT_CONTROL["next_offer"]:
+            return "next"
         print("\n▶️  BOT REANUDADO por el usuario.")
         hablar("Bot reanudado.")
     return "ok"
@@ -2956,6 +3197,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     st = await comprobar_pausa_y_parada(page)
     if st == "stop":
         return "stop", "Bot detenido por el usuario con la X roja"
+    if st == "next":
+        return "siguiente", "Avanzado manualmente hacia la siguiente oferta"
 
     # PASO 2: Si aparece modal con 'Comenzar', pulsarlo
     await pulsar_comenzar_si_existe(page)
@@ -2972,6 +3215,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     st = await comprobar_pausa_y_parada(page)
     if st == "stop":
         return "stop", "Bot detenido por el usuario con la X roja"
+    if st == "next":
+        return "siguiente", "Avanzado manualmente hacia la siguiente oferta"
 
     # PASO 3: Rellenar formulario (incluyendo asistente multipaso LinkedIn si aplica)
     qa_list = await avanzar_wizard_linkedin_si_existe(page, empresa, titulo)
@@ -3016,6 +3261,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     st = await comprobar_pausa_y_parada(page)
     if st == "stop":
         return "stop", "Bot detenido por el usuario con la X roja"
+    if st == "next":
+        return "siguiente", "Avanzado manualmente hacia la siguiente oferta"
 
     # PASO 4: LEER EN VOZ ALTA CADA PREGUNTA Y SU RESPUESTA CON DI
     traer_brave_al_frente()
@@ -3026,6 +3273,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             st = await comprobar_pausa_y_parada(page)
             if st == "stop":
                 return "stop", "Bot detenido por el usuario con la X roja"
+            if st == "next":
+                return "siguiente", "Avanzado manualmente hacia la siguiente oferta"
 
             q_clean = item['pregunta']
             r_full = item['respuesta']
@@ -3124,6 +3373,11 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             print(f"\n🛑 ¡Detectado clic en Detener Bot! Detención total solicitada por el usuario.")
             return "stop", "Bot detenido por el usuario desde el panel flotante"
 
+        if GLOBAL_BOT_CONTROL["next_offer"]:
+            _sincronizar_ediciones_en_memoria(ultimo_qa_map, forzar=True)
+            print(f"\n⏭️  Pulsado 'Continuar siguiente': avanzando a la próxima oferta sin enviar la actual.")
+            return "siguiente", "Avanzado manualmente hacia la siguiente oferta"
+
         if GLOBAL_BOT_CONTROL["paused"]:
             if not esta_pausado_prev:
                 print(f"\n⏸️  BOT PAUSADO por el usuario desde el botón flotante.")
@@ -3170,6 +3424,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     st = await comprobar_pausa_y_parada(page)
     if st == "stop":
         return "stop", "Bot detenido por el usuario con la X roja"
+    if st == "next":
+        return "siguiente", "Avanzado manualmente hacia la siguiente oferta"
 
     # PASO 6: Pulsar el SEGUNDO 'Postular' si no hubo clic manual
     if not clic_manual:
@@ -3275,6 +3531,10 @@ async def _esperar_post_envio_y_cerrar(browser, tabs_oferta: list, empresa: str,
             print("\n▶️  Reanudado tras revisión: cerrando pestaña confirmada y pasando a la siguiente...")
             hablar("Cerrando y pasando a la siguiente oferta.")
             break
+        if GLOBAL_BOT_CONTROL["next_offer"]:
+            GLOBAL_BOT_CONTROL["next_offer"] = False
+            print("\n⏭️  Continuando inmediatamente hacia la siguiente oferta...")
+            break
         if GLOBAL_BOT_CONTROL["skip_wait"]:
             GLOBAL_BOT_CONTROL["skip_wait"] = False
             print("\n🚀 Avance inmediato solicitado: cerrando pestaña confirmada...")
@@ -3366,6 +3626,10 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
             titulo = of["titulo"][:45]
             empresa = of["empresa"][:25]
             portal = of["portal"]
+            GLOBAL_BOT_CONTROL["next_offer"] = False
+            GLOBAL_BOT_CONTROL["inv_status"] = ""
+            GLOBAL_BOT_CONTROL["oferta_actual"] = of
+            _registrar_historial_oferta(of)
 
             print(f"\n>>> [{i}/{total}] Procesando oferta #{of_id}: {empresa} - {titulo} ({portal})")
             page_reusada = None
@@ -3395,6 +3659,11 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                 res_tipo, msg = await procesar_oferta_interactiva(page, of, segundos_revision=segundos_revision, tabs_oferta=tabs_oferta)
             except Exception as e:
                 res_tipo, msg = "error", f"Error en oferta: {str(e)[:60]}"
+            try:
+                if tabs_oferta and not tabs_oferta[-1].is_closed():
+                    _registrar_historial_oferta(of, tabs_oferta[-1].url)
+            except Exception:
+                pass
 
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             conn = sqlite3.connect(DB_PATH)
@@ -3451,6 +3720,13 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                         await pg_o.close()
                     except Exception:
                         pass
+            elif res_tipo == "siguiente":
+                GLOBAL_BOT_CONTROL["next_offer"] = False
+                for pg_o in tabs_oferta:
+                    TABS_PROTEGIDAS_MANUAL.add(pg_o)
+                c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Siguiente manual] {msg}", of_id))
+                conn.commit()
+                hablar(f"Pasando a la siguiente oferta tras {empresa}.")
             else:
                 c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Revisión en pantalla] {msg}", of_id))
                 conn.commit()
@@ -3464,7 +3740,7 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                 hablar(f"Atención: la postulación a {empresa} no se completó ni confirmó el envío. Queda pausada y abierta para revisarla. Cuando la envíes, esperaré los 30 segundos antes de cerrarla.")
 
                 confirmado_manual = False
-                while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"]:
+                while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"] and not GLOBAL_BOT_CONTROL["next_offer"]:
                     if await _tabs_tienen_confirmacion(tabs_oferta):
                         confirmado_manual = True
                         GLOBAL_BOT_CONTROL["paused"] = False
