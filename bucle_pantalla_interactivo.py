@@ -702,6 +702,23 @@ async def pulsar_primer_postula(page) -> bool:
     except Exception:
         pass
 
+    # En SPAs como Laborum, esperar brevemente hidratación y rellenar sueldo pretendido (=0 para prácticas) si ya está visible
+    if "laborum.cl" in page.url.lower():
+        try:
+            await page.locator("button:has-text('Postularme'), input#salarioPretendido").first.wait_for(state="visible", timeout=3500)
+        except Exception:
+            pass
+        try:
+            sal = page.locator("input#salarioPretendido, input[name='salarioPretendido']").first
+            if await sal.count() > 0 and await sal.is_visible():
+                cur_v = (await sal.input_value() or "").strip()
+                if not cur_v:
+                    await sal.fill("0")
+                    await sal.evaluate("el => { el.dataset.autopostulaFilled = '1'; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }")
+                    print("💵 Sueldo pretendido en Laborum completado automáticamente en 0.")
+        except Exception:
+            pass
+
     selectores = [
         "button.btn.primary-btn.blue.aim",
         "button:has-text('Postula fácil')",
@@ -1016,6 +1033,7 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
     # 2. Autocompletado de campos de texto/email/tel personal si están vacíos
     inputs = await page.locator("input[type='text']:visible, input[type='email']:visible, input[type='tel']:visible, input[type='url']:visible, input:not([type]):visible").all()
     reglas_texto = [
+        (["sueldo", "salario", "salariopretendido", "renta pretendida", "remuneración", "remuneracion"], "0"),
         (["nombre completo", "full name", "nombre y apellido"], perfil["nombre_completo"]),
         (["primer apellido", "apellido paterno", "last name", "surname", "apellidos", "apellido"], perfil["apellidos"]),
         (["segundo nombre", "middle name"], ""),
@@ -1038,7 +1056,7 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
         try:
             meta = await inp.evaluate(r'''el => {
                 if (el.dataset.autopostulaFilled === '1' || el.disabled || el.readOnly) return {skip: true};
-                if (el.closest('header') || el.closest('nav') || el.closest('.search-box') || el.closest('#search')) return {skip: true};
+                if (el.closest('header') || el.closest('nav') || el.closest('footer') || el.closest('.search-box') || el.closest('#search')) return {skip: true};
                 const val = (el.value || '').trim();
                 if (val.length > 0) return {skip: true};
                 let label = '';
@@ -1060,13 +1078,13 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
                         p = p.parentElement;
                     }
                 }
-                return {skip: false, label: label, type: (el.type||'').toLowerCase(), id: el.id||'', name: el.name||''};
+                return {skip: false, label: label, ph: el.placeholder || '', type: (el.type||'').toLowerCase(), id: el.id||'', name: el.name||''};
             }''')
             if meta.get("skip"):
                 continue
 
-            etiqueta = f"{meta.get('label', '')} {meta.get('name', '')} {meta.get('id', '')}".lower().replace("*", "").strip()
-            if any(blk in etiqueta for blk in ["search", "buscar", "filtro", "keywords"]):
+            etiqueta = f"{meta.get('label', '')} {meta.get('ph', '')} {meta.get('name', '')} {meta.get('id', '')}".lower().replace("*", "").strip()
+            if any(blk in etiqueta for blk in ["search", "buscar", "filtro", "keywords", "react-select", "select-footer"]):
                 continue
 
             valor = None
@@ -1074,9 +1092,11 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
                 valor = perfil["email"]
             elif meta.get("type") == "tel":
                 valor = perfil["telefono"]
+            elif any(s in etiqueta for s in ["sueldo", "salario", "renta pretendida", "remunerac"]):
+                valor = "0"
             else:
                 for claves, val_regla in reglas_texto:
-                    if any(c in etiqueta for c in claves):
+                    if any(re.search(r'(?<!\w)' + re.escape(c) + r'(?!\w)', etiqueta) for c in claves):
                         valor = val_regla
                         break
 
@@ -1155,7 +1175,7 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
             es_valido = await el.evaluate(r'''el => {
                 if (el.dataset.autopostulaFilled === '1') return false;
                 if (el.type === 'search' || el.type === 'hidden' || el.type === 'submit' || el.type === 'radio' || el.type === 'checkbox' || el.type === 'file' || el.type === 'email' || el.type === 'tel') return false;
-                if (el.closest('header') || el.closest('nav') || el.closest('#navbar') || el.closest('.search-box') || el.closest('#search') || el.closest('.filters') || el.closest('.sidebar') || el.closest('.banner')) return false;
+                if (el.closest('header') || el.closest('nav') || el.closest('footer') || el.closest('#navbar') || el.closest('.search-box') || el.closest('#search') || el.closest('.filters') || el.closest('.sidebar') || el.closest('.banner')) return false;
                 
                 // En LinkedIn Easy Apply, si el input ya viene prellenado con teléfono/ciudad/nombre y no es una pregunta, respetarlo
                 if (el.closest('dialog[open]') || el.closest('.jobs-easy-apply-modal')) {
@@ -1179,9 +1199,9 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
                 const aria = (el.getAttribute('aria-label') || "").toLowerCase();
                 const cls = (el.className || "").toLowerCase();
 
-                const blacklist = ['search', 'buscar', 'busqueda', 'filtro', 'title', 'keywords', 'keyword', 'query', 'cargo', 'location', 'ubicacion', 'selectized', 'form_co', 'form_category', 'form_client', 'email_suscribir', 'newsletter'];
+                const blacklist = ['search', 'buscar', 'busqueda', 'filtro', 'title', 'keywords', 'keyword', 'query', 'cargo', 'location', 'ubicacion', 'selectized', 'form_co', 'form_category', 'form_client', 'email_suscribir', 'newsletter', 'react-select', 'select-footer'];
                 for (let b of blacklist) {
-                    if (name === b || id === b || placeholder.includes(b) || aria.includes(b) || cls.includes(b)) {
+                    if (name === b || id === b || id.includes(b) || placeholder.includes(b) || aria.includes(b) || cls.includes(b)) {
                         return false;
                     }
                 }
