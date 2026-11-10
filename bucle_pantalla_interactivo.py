@@ -344,6 +344,12 @@ _WIDGET_JS = """
     window.__autopostula_hovering = false;
 
     function pushCmd(action, value = null) {
+        if (typeof window.__autopostula_host_cmd === 'function') {
+            try {
+                window.__autopostula_host_cmd(action, value);
+                return;
+            } catch(e) {}
+        }
         window.__autopostula_pending_cmd = { action, value, ts: Date.now() };
     }
 
@@ -571,8 +577,9 @@ _WIDGET_JS = """
 
             modal.querySelector('#autopostula-modal-toggle')?.addEventListener('click', (e) => {
                 e.stopPropagation();
-                window.__autopostula_paused = !window.__autopostula_paused;
-                pushCmd('toggle_pause', window.__autopostula_paused);
+                const nextPaused = !window.__autopostula_paused;
+                window.__autopostula_paused = nextPaused;
+                pushCmd(nextPaused ? 'pause' : 'resume', nextPaused);
                 updateWidgetState();
             });
 
@@ -686,26 +693,21 @@ def es_pagina_comercial_no_laboral(url: str, body_text: str) -> bool:
 
 
 async def gestionar_limite_pestanas(browser, max_tabs: int | None = None, tabs_protegidas: set | None = None) -> int:
-    """Mantiene abiertas como máximo `max_tabs` pestañas laborales, cerrando las cerradas, completadas, spam comercial o sin postulación en curso."""
+    """Mantiene abiertas como máximo `max_tabs` pestañas laborales (incluyendo portales ATS externos), cerrando las cerradas, completadas, spam comercial o sin postulación en curso."""
     if not browser:
         return 0
     limite = max(1, int(max_tabs or GLOBAL_BOT_CONTROL.get("max_tabs", 4)))
     protegidas = tabs_protegidas or set()
-    job_domains = [
-        "linkedin.com/jobs", "linkedin.com/service-marketplace", "trabajando.cl/trabajo",
-        "firstjob.me/oferta", "laborum.cl/empleos", "computrabajo.cl/ofertas",
-        "chiletrabajos.cl/trabajo", "duoclaboral.cl/trabajar", "csod.com",
-        "pandape.computrabajo", "aira", "buk", "accenture.com/cl-es/careers"
+    keep_personal = [
+        "mis-postulaciones", "campusvirtual.duoc.cl", "localhost:8087",
+        "/postulantes/curriculum", "linkedin.com/in/", "github.com", "google.com/search"
     ]
-    keep_personal = ["mis-postulaciones", "campusvirtual.duoc.cl", "localhost:8087", "/postulantes/curriculum", "linkedin.com/in/"]
 
     evaluadas = []
     for ctx in list(browser.contexts):
         for pg in list(ctx.pages):
             u = (pg.url or "").lower()
             if not u.startswith("http") or any(k in u for k in keep_personal):
-                continue
-            if not any(d in u for d in job_domains):
                 continue
             try:
                 info = await pg.evaluate(r'''() => {
@@ -747,9 +749,11 @@ async def gestionar_limite_pestanas(browser, max_tabs: int | None = None, tabs_p
         else:
             restantes.append(item)
 
-    # 2. Si aún superan el límite `max_tabs`, cerrar las pestañas más antiguas que NO tienen postulación en proceso
+    # 2. Si aún superan el límite `max_tabs`, cerrar primero sin proceso y luego las más antiguas no protegidas hasta cumplir <= limite
     while len(restantes) > limite:
         candidato = next((x for x in restantes if not x["en_proceso"] and x["pg"] not in protegidas), None)
+        if not candidato:
+            candidato = next((x for x in restantes if x["pg"] not in protegidas), None)
         if not candidato:
             break
         restantes.remove(candidato)
@@ -760,8 +764,37 @@ async def gestionar_limite_pestanas(browser, max_tabs: int | None = None, tabs_p
             pass
 
     if cerradas > 0:
-        print(f"🧹 Limpieza automática: se cerraron {cerradas} pestañas laborales cerradas/completadas/sin proceso (límite={limite}).")
+        print(f"🧹 Limpieza automática: se cerraron {cerradas} pestañas laborales (quedaron {len(restantes)}/{limite}).")
     return cerradas
+
+
+def _aplicar_comando_control(act: str, val=None):
+    """Aplica de forma atómica e instantánea cualquier comando recibido desde cualquier pestaña o ventana."""
+    if act == "pause":
+        GLOBAL_BOT_CONTROL["paused"] = True
+    elif act == "resume":
+        GLOBAL_BOT_CONTROL["paused"] = False
+    elif act == "toggle_pause":
+        GLOBAL_BOT_CONTROL["paused"] = not GLOBAL_BOT_CONTROL["paused"]
+    elif act == "stop":
+        GLOBAL_BOT_CONTROL["stop"] = True
+    elif act == "skip_wait":
+        GLOBAL_BOT_CONTROL["skip_wait"] = True
+    elif act == "set_seconds" and val:
+        GLOBAL_BOT_CONTROL["segundos"] = int(val)
+    elif act == "set_panel_open":
+        GLOBAL_BOT_CONTROL["panel_open"] = bool(val)
+    elif act == "toggle_autodesc":
+        GLOBAL_BOT_CONTROL["leer_descripcion"] = bool(val)
+        estado_txt = "activada" if GLOBAL_BOT_CONTROL["leer_descripcion"] else "desactivada"
+        hablar(f"Lectura automática de descripciones {estado_txt}.")
+    elif act == "read_desc_now":
+        GLOBAL_BOT_CONTROL["read_desc_now"] = True
+    elif act == "set_max_tabs" and val:
+        GLOBAL_BOT_CONTROL["max_tabs"] = max(1, min(15, int(val)))
+        GLOBAL_BOT_CONTROL["clean_tabs_now"] = True
+    elif act == "clean_tabs_now":
+        GLOBAL_BOT_CONTROL["clean_tabs_now"] = True
 
 
 async def sincronizar_widgets_navegador(browser):
@@ -796,30 +829,7 @@ async def sincronizar_widgets_navegador(browser):
 
     for cmd in cmds_validos:
         GLOBAL_BOT_CONTROL["last_cmd_ts"] = cmd["ts"]
-        act = cmd.get("action")
-        if act == "toggle_pause":
-            GLOBAL_BOT_CONTROL["paused"] = not GLOBAL_BOT_CONTROL["paused"]
-        elif act == "pause":
-            GLOBAL_BOT_CONTROL["paused"] = True
-        elif act == "stop":
-            GLOBAL_BOT_CONTROL["stop"] = True
-        elif act == "skip_wait":
-            GLOBAL_BOT_CONTROL["skip_wait"] = True
-        elif act == "set_seconds" and cmd.get("value"):
-            GLOBAL_BOT_CONTROL["segundos"] = int(cmd["value"])
-        elif act == "set_panel_open":
-            GLOBAL_BOT_CONTROL["panel_open"] = bool(cmd.get("value"))
-        elif act == "toggle_autodesc":
-            GLOBAL_BOT_CONTROL["leer_descripcion"] = bool(cmd.get("value"))
-            estado_txt = "activada" if GLOBAL_BOT_CONTROL["leer_descripcion"] else "desactivada"
-            hablar(f"Lectura automática de descripciones {estado_txt}.")
-        elif act == "read_desc_now":
-            GLOBAL_BOT_CONTROL["read_desc_now"] = True
-        elif act == "set_max_tabs" and cmd.get("value"):
-            GLOBAL_BOT_CONTROL["max_tabs"] = max(1, min(15, int(cmd["value"])))
-            GLOBAL_BOT_CONTROL["clean_tabs_now"] = True
-        elif act == "clean_tabs_now":
-            GLOBAL_BOT_CONTROL["clean_tabs_now"] = True
+        _aplicar_comando_control(cmd.get("action"), cmd.get("value"))
 
     if GLOBAL_BOT_CONTROL["read_desc_now"]:
         GLOBAL_BOT_CONTROL["read_desc_now"] = False
@@ -1403,7 +1413,7 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
             if not await el.is_visible():
                 continue
             es_valido = await el.evaluate(r'''el => {
-                if (el.dataset.autopostulaFilled === '1') return false;
+                if (el.dataset.autopostulaFilled === '1' || el.disabled || el.readOnly || el.name === 'supportTextfield' || el.closest('[aria-hidden="true"]')) return false;
                 if (el.type === 'search' || el.type === 'hidden' || el.type === 'submit' || el.type === 'radio' || el.type === 'checkbox' || el.type === 'file' || el.type === 'email' || el.type === 'tel') return false;
                 if (el.closest('header') || el.closest('nav') || el.closest('footer') || el.closest('#navbar') || el.closest('.search-box') || el.closest('#search') || el.closest('.filters') || el.closest('.sidebar') || el.closest('.banner')) return false;
                 
@@ -1593,9 +1603,9 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
             if max_len and max_len < len(resp):
                 resp = resp[:max_len]
 
-            await ta.scroll_into_view_if_needed()
-            await ta.click()
-            await ta.fill(resp)
+            await ta.scroll_into_view_if_needed(timeout=3000)
+            await ta.click(timeout=3500)
+            await ta.fill(resp, timeout=3500)
             await ta.evaluate('''(el, payload) => {
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -2030,9 +2040,17 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             await nueva_tab.wait_for_load_state("domcontentloaded", timeout=15000)
         except Exception:
             pass
+        old_page = page
         page = nueva_tab
         if page not in tabs_oferta:
             tabs_oferta.append(page)
+        try:
+            if old_page != page:
+                await old_page.close()
+                if old_page in tabs_oferta:
+                    tabs_oferta.remove(old_page)
+        except Exception:
+            pass
         await page.bring_to_front()
         await asyncio.sleep(1.5)
         await inyectar_boton_flotante_control(page)
@@ -2382,6 +2400,10 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
             browser = await p.chromium.connect_over_cdp("http://localhost:9222")
             ctx = browser.contexts[0]
             try:
+                await ctx.expose_function("__autopostula_host_cmd", _aplicar_comando_control)
+            except Exception:
+                pass
+            try:
                 await ctx.add_init_script(_WIDGET_JS)
             except Exception:
                 pass
@@ -2396,6 +2418,11 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
         cerradas = 0
 
         for i, of in enumerate(ofertas, 1):
+            if GLOBAL_BOT_CONTROL["paused"] or GLOBAL_BOT_CONTROL["stop"]:
+                st_bucle = await comprobar_pausa_y_parada(ctx.pages[-1] if ctx.pages else None)
+                if st_bucle == "stop":
+                    await desactivar_widgets_navegador(browser)
+                    return
             of_id = of["id"]
             titulo = of["titulo"][:45]
             empresa = of["empresa"][:25]
