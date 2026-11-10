@@ -324,6 +324,7 @@ FRASES_CERRADA = [
 
 FRASES_YA_POSTULADO = [
     "usted ya ha presentado solicitud", "ya ha presentado solicitud",
+    "ya estás participando en el proceso", "ya ha sido utilizado para postularte",
     "ya ha realizado una solicitud", "ya has realizado una solicitud",
     "you have already applied", "ya te has postulado", "ya has postulado",
     "ya estás postulado", "ya te postulaste", "ya postulaste",
@@ -343,6 +344,7 @@ FRASES_CONFIRMACION_ENVIO = [
     "has postulado con éxito", "ya te has postulado", "ya has postulado",
     "ya estás postulado", "ya postulaste", "postular de nuevo",
     "usted ya ha presentado solicitud", "ya ha presentado solicitud",
+    "ya estás participando en el proceso", "ya ha sido utilizado para postularte",
     "ya ha realizado una solicitud", "ya has realizado una solicitud",
     "application was sent", "application submitted", "application received",
     "thank you for applying", "thank you for your application",
@@ -553,6 +555,7 @@ _WIDGET_JS = """
     }
 
     function createOrAttachWidget() {
+        if (window.__autopostula_disabled) return;
         const targetParent = document.documentElement || document.body;
         if (!targetParent) return;
 
@@ -891,6 +894,7 @@ _WIDGET_JS = """
 
     window.__ensure_autopostula_widget = createOrAttachWidget;
     window.__autopostula_sync_state = (st) => {
+        window.__autopostula_disabled = false;
         window.__autopostula_paused = !!st.paused;
         window.__autopostula_stop = !!st.stop;
         window.__autopostula_timer_text = st.timer_text || '30s';
@@ -1207,6 +1211,7 @@ async def desactivar_widgets_navegador(browser):
             for fr in list(pg.frames):
                 try:
                     await fr.evaluate('''() => {
+                        window.__autopostula_disabled = true;
                         if (window.__autopostula_interval) {
                             clearInterval(window.__autopostula_interval);
                             window.__autopostula_interval = null;
@@ -1561,10 +1566,10 @@ async def manejar_redireccion_externa(page):
             await asyncio.sleep(2.0)
             await inyectar_boton_flotante_control(page)
 
-        # 1.5 Si quedó abierto el dropdown de Pandape ('APLICAR A ESTE PROCESO'), elegir 'Redactar currículum' o 'Computrabajo' (/ApplyCT/)
+        # 1.5 Si quedó abierto el dropdown de Pandape ('APLICAR A ESTE PROCESO'), elegir primero 'Computrabajo' (/ApplyCT/)
         if "pandape" in page.url.lower():
             try:
-                dd_item = page.locator(".dropdown-menu.show a[href*='ApplyCT'], .dropdown-menu.show a:has-text('Redactar currículum')").first
+                dd_item = page.locator(".dropdown-menu.show a:has-text('Computrabajo'), .dropdown-menu.show a[href*='ApplyCT'], .dropdown-menu.show a:has-text('Redactar currículum')").first
                 if await dd_item.count() > 0 and await dd_item.is_visible():
                     txt_dd = (await dd_item.inner_text() or "").strip()
                     print(f"🚀 Pandape: eligiendo '{txt_dd}' del menú de postulación...")
@@ -1581,6 +1586,7 @@ async def manejar_redireccion_externa(page):
             try:
                 await page.locator(
                     "button:has-text('Solicitar ahora'), a:has-text('Solicitar ahora'), "
+                    "a:has-text('APLICAR A ESTE PROCESO'), a.js_customDDbt, "
                     "button:has-text('Postúlate Ahora'), button:has-text('Postularse'), "
                     "a:has-text('Rellenar automáticamente con currículo'), a:has-text('Autofill with Resume'), "
                     "button:has-text('Enviar solicitud'), button:has-text('Apply now'), "
@@ -1649,14 +1655,25 @@ async def manejar_redireccion_externa(page):
                             await loc.click(timeout=5000)
                             clic_redir = True
                             await asyncio.sleep(3.0)
-                            # Si abrió dropdown de Pandape, seleccionar de inmediato Redactar currículum (/ApplyCT/)
+                            # Si abrió dropdown de Pandape, seleccionar de inmediato Computrabajo (/ApplyCT/) o Redactar currículum
                             if "pandape" in page.url.lower():
-                                dd_item = page.locator(".dropdown-menu.show a[href*='ApplyCT'], .dropdown-menu.show a:has-text('Redactar currículum')").first
+                                dd_item = page.locator(".dropdown-menu.show a:has-text('Computrabajo'), .dropdown-menu.show a[href*='ApplyCT'], .dropdown-menu.show a:has-text('Redactar currículum')").first
+                                if await dd_item.count() == 0 or not await dd_item.is_visible():
+                                    await page.evaluate("() => { document.querySelector('a.js_customDDbt')?.click(); }")
+                                    await asyncio.sleep(0.8)
+                                dd_item = page.locator(".dropdown-menu.show a:has-text('Computrabajo'), .dropdown-menu.show a[href*='ApplyCT'], .dropdown-menu.show a:has-text('Redactar currículum')").first
                                 if await dd_item.count() > 0 and await dd_item.is_visible():
                                     txt_dd = (await dd_item.inner_text() or "").strip()
                                     print(f"🚀 Pandape: eligiendo '{txt_dd}' tras abrir menú...")
                                     await dd_item.click(timeout=5000)
                                     await asyncio.sleep(3.0)
+                                else:
+                                    href_ct = await page.locator("a[href*='/ApplyCT/']").first.get_attribute("href")
+                                    if href_ct:
+                                        from urllib.parse import urljoin
+                                        print(f"🚀 Pandape: abriendo formulario directo {href_ct}...")
+                                        await page.goto(urljoin(page.url, href_ct), wait_until="domcontentloaded", timeout=20000)
+                                        await asyncio.sleep(2.5)
                             break
                     if clic_redir:
                         break
@@ -1718,7 +1735,7 @@ async def manejar_autenticacion_portal(page, empresa: str = "", solo_auto: bool 
             const eBtn = !!document.querySelector("button[data-automation-id='SignInWithEmailButton']");
             const hasPass = Array.from(document.querySelectorAll('input[type="password"]')).some(e => e.offsetParent !== null);
             const hasFile = document.querySelectorAll("input[type='file']").length > 0;
-            const txtAuth = ['iniciar sesión', 'inicia sesión', 'crear cuenta', 'sign in', 'create account', 'conexión con google', 'acceder con google', 'elige una cuenta'].some(k => bt.includes(k));
+            const txtAuth = ['iniciar sesión', 'inicia sesión', 'crear cuenta', 'sign in', 'create account', 'conexión con google', 'acceder con google', 'elige una cuenta', 'identificar tu candidatura', 'cuál es tu correo'].some(k => bt.includes(k));
             return { isGoogle: u.includes('accounts.google.com'), gBtn, eBtn, hasPass, hasFile, txtAuth, u };
         }''')
     except Exception:
@@ -1729,7 +1746,7 @@ async def manejar_autenticacion_portal(page, empresa: str = "", solo_auto: bool 
         or ctx_auth["gBtn"]
         or ctx_auth["eBtn"]
         or (ctx_auth["hasPass"] and not ctx_auth["hasFile"])
-        or (ctx_auth["txtAuth"] and not ctx_auth["hasFile"] and ("myworkdayjobs.com" in ctx_auth["u"] or "login" in ctx_auth["u"] or "iniciar" in ctx_auth["u"]))
+        or (ctx_auth["txtAuth"] and not ctx_auth["hasFile"] and ("myworkdayjobs.com" in ctx_auth["u"] or "pandape" in ctx_auth["u"] or "/applyct" in ctx_auth["u"] or "login" in ctx_auth["u"] or "iniciar" in ctx_auth["u"]))
     )
     if not es_auth:
         return page, True, "no_requiere_login"
@@ -1858,6 +1875,19 @@ async def manejar_autenticacion_portal(page, empresa: str = "", solo_auto: bool 
         pass
 
     await autocompletar_datos_personales_y_cv(page)
+
+    # En Pandape (/ApplyCT/), si rellenó el correo electrónico y no pide clave aún, pulsar CONTINUAR
+    if ("pandape" in (page.url or "").lower() or "/applyct" in (page.url or "").lower()) and await page.locator("input[type='password']:visible").count() == 0:
+        try:
+            em_v = await page.locator("#Email:visible, input[type='email']:visible").first.input_value()
+            if (em_v or "").strip():
+                btn_c = page.locator("button:has-text('CONTINUAR'), input[type='submit'][value*='CONTINUAR' i], button:has-text('Continuar')").first
+                if await btn_c.count() > 0 and await btn_c.is_visible():
+                    print("📧 Pandape: correo ingresado, pulsando CONTINUAR...")
+                    await btn_c.click(timeout=5000)
+                    await asyncio.sleep(3.0)
+        except Exception:
+            pass
 
     # Intentar Bitwarden / gestor de contraseñas guardado en Brave si hay input password visible
     try:
@@ -3071,6 +3101,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     ya_en_formulario_ats = (
         ("myworkdayjobs.com" in (page.url or "").lower() and "/apply" in (page.url or "").lower())
         or ("csod.com" in (page.url or "").lower() and "/application" in (page.url or "").lower())
+        or ("pandape" in (page.url or "").lower() and ("/apply" in (page.url or "").lower() or "/detail/" in (page.url or "").lower()))
     )
     if not ya_en_formulario_ats:
         try:
@@ -3428,6 +3459,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         return "siguiente", "Avanzado manualmente hacia la siguiente oferta"
 
     # PASO 6: Pulsar el SEGUNDO 'Postular' si no hubo clic manual
+    res_envio = False
     if not clic_manual:
         print(f"⏰ Tiempo de revisión cumplido ({segundos_revision}s). Pulsando el segundo botón Postular...")
         hablar("Tiempo cumplido. Enviando postulación.")
@@ -3461,8 +3493,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         except Exception:
             pass
 
-        # Si hubo formulario de preguntas (modal o dialog LinkedIn) y se cerró tras el clic de envío
-        if qa_list or tuvo_modal:
+        # Si hubo formulario de preguntas (modal o dialog LinkedIn) y se cerró tras un clic REAL de envío (no en /Detail/)
+        if (qa_list or tuvo_modal) and (clic_manual or res_envio) and ("/detail/" not in url_final):
             modal_abierto = await page.evaluate('''() => {
                 const form = document.querySelector("form#formularioPreguntasOferta") || document.querySelector(".modal.show") || document.querySelector(".offcanvas.show") || document.querySelector("dialog[open]") || document.querySelector("div.jobs-easy-apply-modal");
                 return Boolean(form && form.offsetParent !== null);
@@ -3633,15 +3665,17 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
 
             print(f"\n>>> [{i}/{total}] Procesando oferta #{of_id}: {empresa} - {titulo} ({portal})")
             page_reusada = None
-            emp_tok = re.sub(r'[^a-z0-9]+', '', empresa.lower().split()[0]) if empresa else ""
+            emp_toks = [t for t in re.findall(r'[a-z0-9]{4,}', empresa.lower()) if t not in {"chile", "empresa", "grupo", "servicios", "mercado", "mayorista"}]
             tit_toks = [t for t in re.findall(r'[a-z0-9]{4,}', titulo.lower()) if t not in {"practica", "ingenieria", "informatica", "chile", "program"}]
             for pg_cand in list(ctx.pages):
                 if pg_cand.is_closed():
                     continue
                 cu = (pg_cand.url or "").lower()
-                es_workday_app = "myworkdayjobs.com" in cu and "/apply" in cu and (not emp_tok or emp_tok in cu) and any(tk in cu for tk in tit_toks[:3])
-                es_csod_app = "csod.com" in cu and "/application" in cu and (not emp_tok or emp_tok in cu)
-                if es_workday_app or es_csod_app:
+                emp_ok = (not emp_toks) or any(et in cu for et in emp_toks) or (len(emp_toks) >= 2 and "".join(emp_toks[-2:]) in cu)
+                es_workday_app = "myworkdayjobs.com" in cu and "/apply" in cu and emp_ok and any(tk in cu for tk in tit_toks[:3])
+                es_csod_app = "csod.com" in cu and "/application" in cu and emp_ok
+                es_pandape_app = "pandape" in cu and ("/apply" in cu or "/detail/" in cu) and (emp_ok or "".join(re.findall(r'[a-z0-9]+', empresa.lower())[-2:]) in cu)
+                if es_workday_app or es_csod_app or es_pandape_app:
                     page_reusada = pg_cand
                     break
             if page_reusada is not None:
