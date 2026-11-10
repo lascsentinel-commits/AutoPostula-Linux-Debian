@@ -2819,45 +2819,52 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
 
     traer_brave_al_frente()
 
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(2.0)
-    except Exception as e:
-        return "error", f"Fallo al cargar URL: {str(e)[:60]}"
+    ya_en_formulario_ats = "myworkdayjobs.com" in (page.url or "").lower() and "/apply" in (page.url or "").lower()
+    if not ya_en_formulario_ats:
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2.0)
+        except Exception as e:
+            return "error", f"Fallo al cargar URL: {str(e)[:60]}"
 
     # Inyectar botón flotante de Pausar/Reanudar y X roja en esquina inferior izquierda
     await inyectar_boton_flotante_control(page)
 
-    # 1. Comprobar si redirigió a un catálogo general o página de búsqueda
-    if es_url_catalogo(page.url, portal):
-        print(f"⚠️  URL redirigió al catálogo general de ofertas ({page.url}). Oferta expirada.")
-        return "cerrada", "La oferta expiró o redirigió al catálogo general de ofertas"
+    if not ya_en_formulario_ats:
+        # 1. Comprobar si redirigió a un catálogo general o página de búsqueda
+        if es_url_catalogo(page.url, portal):
+            print(f"⚠️  URL redirigió al catálogo general de ofertas ({page.url}). Oferta expirada.")
+            return "cerrada", "La oferta expiró o redirigió al catálogo general de ofertas"
 
-    # Verificar si el usuario pulsó Cerrar o Pausar de inmediato
-    st = await comprobar_pausa_y_parada(page)
-    if st == "stop":
-        return "stop", "Bot detenido por el usuario con la X roja"
+        # Verificar si el usuario pulsó Cerrar o Pausar de inmediato
+        st = await comprobar_pausa_y_parada(page)
+        if st == "stop":
+            return "stop", "Bot detenido por el usuario con la X roja"
 
-    # Comprobar si ya está postulado o cerrada
-    body_text = (await page.inner_text("body") or "").lower()
-    if any(w in body_text for w in FRASES_YA_POSTULADO):
-        return "ya_postulado", "Ya estabas postulado previamente a esta oferta"
+        # Comprobar si ya está postulado o cerrada
+        body_text = (await page.inner_text("body") or "").lower()
+        if any(w in body_text for w in FRASES_YA_POSTULADO):
+            return "ya_postulado", "Ya estabas postulado previamente a esta oferta"
 
-    if any(w in body_text for w in FRASES_CERRADA):
-        print("⚠️  Detectado mensaje de oferta cerrada o finalizada en el portal.")
-        return "cerrada", "Oferta cerrada o expirada en el portal"
+        if any(w in body_text for w in FRASES_CERRADA):
+            print("⚠️  Detectado mensaje de oferta cerrada o finalizada en el portal.")
+            return "cerrada", "Oferta cerrada o expirada en el portal"
 
-    # PASO 0.5: Expandir y leer 'Acerca del empleo' / descripción completa para validar requisitos reales
-    es_valida, _desc_comp, motivo_desc = await leer_y_validar_descripcion_oferta(page, oferta)
-    if not es_valida:
-        return "descartada_desc", motivo_desc
+        # PASO 0.5: Expandir y leer 'Acerca del empleo' / descripción completa para validar requisitos reales
+        es_valida, _desc_comp, motivo_desc = await leer_y_validar_descripcion_oferta(page, oferta)
+        if not es_valida:
+            return "descartada_desc", motivo_desc
 
-    # PASO 1: Pulsar el primer botón 'Postula fácil' / 'Postularme' / 'Solicitud sencilla' / 'Solicitar'
+        # PASO 1: Pulsar el primer botón 'Postula fácil' / 'Postularme' / 'Solicitud sencilla' / 'Solicitar'
     print("Paso 1: Buscando y pulsando botón inicial (Postula fácil / Solicitud sencilla)...")
-    tabs_antes = list(page.context.pages)
-    clic_inicial = await pulsar_primer_postula(page)
-    print(f"Resultado clic inicial: {'Exitoso' if clic_inicial else 'No encontrado'}")
-    await asyncio.sleep(2.5)
+    if not ya_en_formulario_ats:
+        tabs_antes = list(page.context.pages)
+        clic_inicial = await pulsar_primer_postula(page)
+        print(f"Resultado clic inicial: {'Exitoso' if clic_inicial else 'No encontrado'}")
+        await asyncio.sleep(2.5)
+    else:
+        tabs_antes = list(page.context.pages)
+        print("♻️  Reenganchado sobre pestaña ATS ya abierta en revisión.")
 
     # Detectar si el clic abrió una pestaña externa nueva (ej: LinkedIn 'Solicitar' en el sitio de la empresa)
     nueva_tab = await _detectar_nueva_pestana_del_bot(tabs_antes, page)
@@ -3344,9 +3351,25 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
             portal = of["portal"]
 
             print(f"\n>>> [{i}/{total}] Procesando oferta #{of_id}: {empresa} - {titulo} ({portal})")
-            await gestionar_limite_pestanas(browser, max(0, GLOBAL_BOT_CONTROL["max_tabs"] - 1))
-            page = await ctx.new_page()
-            BOT_OWNED_PAGES.add(page)
+            page_reusada = None
+            emp_tok = re.sub(r'[^a-z0-9]+', '', empresa.lower().split()[0]) if empresa else ""
+            tit_toks = [t for t in re.findall(r'[a-z0-9]{4,}', titulo.lower()) if t not in {"practica", "ingenieria", "informatica", "chile", "program"}]
+            for pg_cand in list(ctx.pages):
+                if pg_cand.is_closed():
+                    continue
+                cu = (pg_cand.url or "").lower()
+                if "myworkdayjobs.com" in cu and "/apply" in cu and (not emp_tok or emp_tok in cu) and any(tk in cu for tk in tit_toks[:3]):
+                    page_reusada = pg_cand
+                    break
+            if page_reusada is not None:
+                page = page_reusada
+                BOT_OWNED_PAGES.add(page)
+                await page.bring_to_front()
+                await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas={page})
+            else:
+                await gestionar_limite_pestanas(browser, max(0, GLOBAL_BOT_CONTROL["max_tabs"] - 1))
+                page = await ctx.new_page()
+                BOT_OWNED_PAGES.add(page)
             tabs_oferta = [page]
 
             try:
