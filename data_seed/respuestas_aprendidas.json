@@ -2,7 +2,7 @@
   {
     "id": 1,
     "pregunta_clave": "¿cuentas con seguro escolar de práctica vigente otorgado por duoc uc?",
-    "respuesta": "Sí, cuento con seguro de Duoc UC",
+    "respuesta": "Sí, cuento con seguro de Duoc UC, hasta 15 de noviembre para obtener las mínimas 360 hrs",
     "categoria": "general",
     "veces_usada": 1,
     "created_at": "2026-10-22 14:06:25"
@@ -78,5 +78,37 @@
     "categoria": "python",
     "veces_usada": 1,
     "created_at": "2026-10-23 00:33:51"
+  },
+  {
+    "id": 11,
+    "pregunta_clave": "disponibilidad inicio fecha diciembre enero verano consolidar practica 360 horas",
+    "respuesta": "Sí, cuento con total disponibilidad diurna completa (lunes a viernes, para iniciar de inmediato o continuar hasta enero/verano según requieran). Por cierre administrativo de Duoc UC, necesitamos consolidar formalmente el convenio de práctica de mínimo 360 horas antes del 15 de noviembre para validarla en este semestre y evitar pagar un semestre extra solo para completar la práctica.",
+    "categoria": "disponibilidad",
+    "veces_usada": 1,
+    "created_at": "2026-11-10 10:24:00"
+  },
+  {
+    "id": 13,
+    "pregunta_clave": "indica tu edad, comuna de residencia y número de contacto actualizado",
+    "respuesta": "Resido en Las Condes, cuento con 26 años (nacido el 11 de febrero del 2000) y mi número de contacto actualizado es +56 9 4850 8528.",
+    "categoria": "editada_en_vivo",
+    "veces_usada": 2,
+    "created_at": "2026-11-10 11:46:09"
+  },
+  {
+    "id": 14,
+    "pregunta_clave": "edad fecha de nacimiento cuantos años tienes",
+    "respuesta": "Tengo 26 años (nacido el 11 de febrero del 2000).",
+    "categoria": "datos_personales",
+    "veces_usada": 1,
+    "created_at": "2026-11-10 11:46:09"
+  },
+  {
+    "id": 16,
+    "pregunta_clave": "indica disponibilidad para comenzar",
+    "respuesta": "Cuento con total disponibilidad diurna completa (lunes a viernes de 40 a 45 horas semanales, para iniciar de inmediato o en la fecha de diciembre/enero que requieran). Solo debo señalar que por normativa administrativa de Duoc UC, es obligatorio consolidar formalmente el convenio de práctica de mínimo 360 horas antes del 15 de noviembre para convalidarla este semestre y evitar pagar un semestre extra solo para la práctica.",
+    "categoria": "editada_en_vivo",
+    "veces_usada": 1,
+    "created_at": "2026-11-10 11:46:47"
   }
 ]

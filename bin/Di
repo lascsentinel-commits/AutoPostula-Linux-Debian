@@ -5,3 +5,4 @@ if [ -f "$SCRIPT_DIR/../venv/bin/python3" ]; then
     PYTHON_BIN="$SCRIPT_DIR/../venv/bin/python3"
 fi
 exec "$PYTHON_BIN" "$SCRIPT_DIR/di.py" "$@"
+

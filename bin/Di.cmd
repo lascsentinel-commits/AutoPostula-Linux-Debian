@@ -5,3 +5,4 @@ if exist "%SCRIPT_DIR%..\venv\Scripts\python.exe" (
 ) else (
     python "%SCRIPT_DIR%di.py" %*
 )
+

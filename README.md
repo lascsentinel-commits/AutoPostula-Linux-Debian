@@ -1,20 +1,35 @@
-# 🎯 AutoPostula · Postulación Asistida con IA sobre Pantalla Real (Chile)
+# 🐧 AutoPostula · Edición Linux Base Debian / Ubuntu
 
-Sistema de postulación asistida y automática a ofertas de **Prácticas Profesionales y Empleos Técnicos** en los principales portales laborales de Chile (**FirstJob, Trabajando.cl, Computrabajo, Laborum, ChileTrabajos, Prácticas Chile**).
+> **💻 Sistema Operativo Compatible:** **Linux Base Debian** (Debian 12+, Ubuntu 22.04/24.04+, Xubuntu, Linux Mint, Kali Linux) con entorno gráfico X11/Wayland.  
+> **🪟 ¿Buscas la versión para Windows 11?** Mantuvimos intacto el repositorio separado de Windows en: [lascsentinel-commits/AutoPostula](https://github.com/lascsentinel-commits/AutoPostula).
 
-A diferencia de los bots headless tradicionales que son bloqueados por Cloudflare o llenan formularios a ciegas, **AutoPostula interactúa sobre tu navegador real (Brave / Chromium vía CDP)**:
-- 👁️ **Visualización en Vivo:** Ves exactamente cada pestaña que se abre y cada respuesta que se ingresa.
-- 🤖 **IA Contextual (Gemini 3.5 Flash-Lite):** Responde preguntas técnicas de reclutadores, motivación de empresa, horas y disponibilidad usando el perfil auténtico del alumno.
-- ⏱️ **Ventanita Flotante de Control:** Pastilla y panel modal desplegable en la esquina inferior izquierda:
-  - `[ ⏸️ Pausar Bot ]` / `[ ▶️ Reanudar Bot ]` para revisar o editar con calma.
-  - Selectores dinámicos de tiempo `[ 15s ]`, `[ 30s ]`, `[ 60s ]`, `[ 2m ]`.
-  - `[ 🚀 Enviar Postulación Ahora ]` para omitir la espera restante si ya revisaste.
-  - `[ 🛑 Detener Bot por Completo ]` para detener el bucle con total seguridad.
-- 🛡️ **Verificación Estricta:** Congelamiento de 5 segundos ante mensajes de éxito confirmados y **prohibición de cerrar pestañas** si no hay confirmación explícita.
+Sistema de postulación asistida con IA sobre pantalla real para ofertas de **Prácticas Profesionales y Empleos Técnicos** en los principales portales laborales de Chile (**FirstJob, Trabajando.cl, Computrabajo, Laborum, ChileTrabajos, DuocLaboral, LinkedIn, Prácticas Chile**).
+
+### ✨ Capacidades Destacadas (Edición Linux Debian)
+- 👁️ **Visualización en Vivo (Brave CDP puerto `9222`):** Ves cada pestaña abierta y cada respuesta escrita en pantalla real sin bloqueos de Cloudflare.
+- 🧠 **Memoria Activa de Respuestas en Tiempo Real (`/memoria`):** Cualquier edición que hagas en pantalla se guarda automáticamente tras ~1.2s incluso en pausa, con panel web CRUD en `http://localhost:8087/memoria` para crear, modificar o borrar preguntas y respuestas.
+- 🔊 **Voz Neural Nativa `Di` (`edge-tts` + Cola FIFO en VLC):** Narración en vivo de cada pregunta y respuesta con prioridad `--final` (`bin/habla.sh` + `bin/play_vlc_managed.sh`).
+- ⏱️ **Ventanita Flotante de Control:**
+  - `[ ⏸️ Pausar Bot ]` / `[ ▶️ Reanudar Bot ]`
+  - Selectores de espera dinámicos `[ 15s ]`, `[ 30s ]`, `[ 60s ]`, `[ 2m ]`
+  - `[ 🚀 Enviar Postulación Ahora ]` y `[ 🧠 Ver / Editar Memoria (Q&A) ]`
+  - `[ 🛑 Detener Bot por Completo ]`
+- 🛡️ **Verificación Estricta:** Prohibición total de cerrar pestañas si no existe confirmación visual de éxito en pantalla.
 
 ---
 
-## 🪟 Ejecución en Windows 11
+## ⚡ Instalación Rápida en Debian / Ubuntu (1 Comando)
+
+```bash
+git clone https://github.com/lascsentinel-commits/AutoPostula-Linux-Debian.git
+cd AutoPostula-Linux-Debian
+chmod +x instalar_debian.sh
+./instalar_debian.sh
+```
+
+---
+
+## 🪟 Nota sobre Windows 11
 
 AutoPostula funciona de forma nativa en **Windows 11**:
 
