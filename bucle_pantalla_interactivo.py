@@ -285,6 +285,29 @@ FRASES_CERRADA = [
 ]
 
 
+async def limpiar_widgets_pestanas(ctx, mantener_page=None):
+    """Elimina paneles flotantes antiguos en pestañas que ya no controla el bot."""
+    if not ctx:
+        return
+    for pg in list(ctx.pages):
+        if mantener_page is not None and pg == mantener_page:
+            continue
+        try:
+            await pg.evaluate('''() => {
+                try { sessionStorage.setItem('autopostula_retired', '1'); } catch(e) {}
+                if (window.__autopostula_interval) {
+                    clearInterval(window.__autopostula_interval);
+                    window.__autopostula_interval = null;
+                }
+                const root = document.getElementById('autopostula-root-container');
+                if (root) root.remove();
+                const old = document.getElementById('autopostula-floating-control');
+                if (old) old.remove();
+            }''')
+        except Exception:
+            pass
+
+
 async def inyectar_boton_flotante_control(page):
     """Inyecta el panel interactivo desplegable (ventanita de control) en la esquina inferior izquierda.
     Contiene:
@@ -295,8 +318,15 @@ async def inyectar_boton_flotante_control(page):
       * Botón 'Enviar Postulación Ahora' para omitir la espera si ya se revisó.
       * Botón de cierre y detención total del bot.
     """
+    try:
+        await limpiar_widgets_pestanas(page.context, mantener_page=page)
+        await page.evaluate("() => { try { sessionStorage.removeItem('autopostula_retired'); } catch(e) {} }")
+    except Exception:
+        pass
+
     js_inject = """
     (() => {
+        try { if (sessionStorage.getItem('autopostula_retired') === '1') return; } catch(e) {}
         window.__autopostula_paused = window.__autopostula_paused || false;
         window.__autopostula_stop = window.__autopostula_stop || false;
         window.__autopostula_skip_wait = false;
@@ -349,7 +379,7 @@ async def inyectar_boton_flotante_control(page):
             }
 
             if (modal) {
-                modal.style.display = window.__autopostula_panel_open ? 'flex' : 'none';
+                modal.style.setProperty('display', window.__autopostula_panel_open ? 'flex' : 'none', 'important');
             }
         }
 
@@ -1587,12 +1617,14 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                 conn.commit()
                 print(f"⚠️  Oferta #{of_id} no confirmó envío automático. MANTENIENDO PESTAÑA ABIERTA PARA EL USUARIO.")
                 hablar(f"Oferta de {empresa} en pantalla para revisión manual. No se cerrará la pestaña.")
+                await limpiar_widgets_pestanas(ctx)
                 await asyncio.sleep(3.0)
                 # NO cerrar la pestaña: se deja abierta para inspección del usuario
 
             conn.close()
             await asyncio.sleep(2.5)
 
+    await limpiar_widgets_pestanas(ctx)
     print("\n==========================================================")
     print(f"🎯 Bucle finalizado: {exitosas} confirmadas | {cerradas} cerradas de {total} procesadas.")
     print("==========================================================")
