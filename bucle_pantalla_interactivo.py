@@ -2371,13 +2371,28 @@ async def _rellenar_paso_workday(page):
             if not cur_sln and perfil.get("segundo_apellido"):
                 await sln.fill(perfil["segundo_apellido"], force=True)
 
+        comuna_inp = page.locator("#address--regionSubdivision1").first
+        if await comuna_inp.count() > 0 and await comuna_inp.is_visible():
+            cur_com = (await comuna_inp.input_value() or "").strip()
+            if not cur_com or len(cur_com) > 35:
+                await comuna_inp.scroll_into_view_if_needed()
+                await comuna_inp.fill("Las Condes", force=True)
+
+        ext_inp = page.locator("#phoneNumber--extension").first
+        if await ext_inp.count() > 0 and await ext_inp.is_visible():
+            cur_ext = (await ext_inp.input_value() or "").strip()
+            if cur_ext and (len(cur_ext) > 6 or not cur_ext.isdigit()):
+                await ext_inp.scroll_into_view_if_needed()
+                await ext_inp.fill("", force=True)
+
         ph_inp = page.locator("#phoneNumber--phoneNumber, input[name='phoneNumber']").first
         if await ph_inp.count() > 0 and await ph_inp.is_visible():
             has_56 = await page.evaluate("() => document.body.innerText.includes('Chile (+56)')")
             if has_56:
                 cur_ph = (await ph_inp.input_value() or "").strip()
-                if cur_ph.startswith("+56"):
-                    await ph_inp.fill("9 4850 8528", force=True)
+                if cur_ph.startswith("+56") or not cur_ph or len(re.sub(r'\D', '', cur_ph)) != 9:
+                    await ph_inp.scroll_into_view_if_needed()
+                    await ph_inp.fill("9 4850 8528")
     except Exception:
         pass
 
@@ -2494,6 +2509,15 @@ async def _rellenar_paso_workday(page):
         edu_ly = page.locator("input[id^='education-'][id$='--lastYearAttended-dateSectionYear-input']").first
         if await edu_ly.count() > 0 and not (await edu_ly.input_value() or "").strip():
             await _type_spin(edu_ly, "2026")
+
+        ruta_cv = perfil.get("ruta_cv") or CV_MASTER_PDF
+        if ruta_cv and os.path.exists(ruta_cv):
+            f_wd = page.locator("input[data-automation-id='file-upload-input-ref'][type='file']").first
+            if await f_wd.count() > 0:
+                ya_cv = await page.evaluate("() => document.body.innerText.includes('.pdf') || document.body.innerText.includes('1_CV_')")
+                if not ya_cv:
+                    await f_wd.set_input_files(ruta_cv)
+                    await asyncio.sleep(1.5)
     except Exception:
         pass
 
@@ -2581,9 +2605,10 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
     for paso in range(1, 8):
         if "myworkdayjobs.com" in url_low:
             await _rellenar_paso_workday(page)
-        await autocompletar_datos_personales_y_cv(page)
-        qa_step = await rellenar_formulario_actual(page, empresa, titulo)
-        qa_acumulada.extend(qa_step)
+        else:
+            await autocompletar_datos_personales_y_cv(page)
+            qa_step = await rellenar_formulario_actual(page, empresa, titulo)
+            qa_acumulada.extend(qa_step)
         await asyncio.sleep(0.6)
 
         if tiene_dlg:
@@ -2600,6 +2625,7 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
             for loc_e in locs_env:
                 if await loc_e.is_visible():
                     es_ajeno = await loc_e.evaluate('''el => {
+                        if (el.getAttribute('aria-haspopup') === 'listbox') return true;
                         if (el.closest('header, nav, footer, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden="true"]')) return true;
                         const frm = el.closest('form');
                         return !!(frm && frm.querySelector('#supportTextfield, [name*="support" i], [id*="support" i]'));
@@ -2619,7 +2645,7 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
             btn_avanzar = None
             for cand_av in locs_av:
                 if await cand_av.is_visible():
-                    es_ajeno = await cand_av.evaluate("el => !!(el.closest('header, nav, footer, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden=\"true\"]'))")
+                    es_ajeno = await cand_av.evaluate("el => el.getAttribute('aria-haspopup') === 'listbox' || !!(el.closest('header, nav, footer, #autopostula-root-container, #supportModal, .modal:not(.show), [aria-hidden=\"true\"]'))")
                     if not es_ajeno:
                         btn_avanzar = cand_av
                         break
@@ -2634,7 +2660,7 @@ async def avanzar_wizard_linkedin_si_existe(page, empresa: str, titulo: str) -> 
                 # Solo detener si la pantalla NO cambió tras el clic Y hay errores visibles reales de validación
                 txt_despues = (await page.inner_text("body") or "")[:1200]
                 misma_pantalla = (page.url == url_antes and txt_antes == txt_despues)
-                err_visibles = await page.locator("[data-automation-id='errorMessage']:visible, .field-validation-error:visible, .invalid-feedback:visible, .artdeco-inline-feedback--error:visible, [role='alert']:visible").count()
+                err_visibles = await page.locator("[data-automation-id='errorMessage']:visible, [id^='error'][id*='--']:visible, [aria-invalid='true']:visible, .field-validation-error:visible, .invalid-feedback:visible, .artdeco-inline-feedback--error:visible, [role='alert']:visible").count()
                 if misma_pantalla and err_visibles > 0:
                     print(f"⚠️  Formulario ({modo}) detuvo el avance por un campo obligatorio pendiente; pasando a revisión en pantalla.")
                     break
