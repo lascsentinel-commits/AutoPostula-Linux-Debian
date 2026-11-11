@@ -115,6 +115,7 @@ def _disparar_investigacion(data: dict) -> dict:
         with open(log_path, "w", encoding="utf-8") as log_f:
             subprocess.Popen(
                 [agy_bin, "--dangerously-skip-permissions", "--mode", "accept-edits", "--add-dir", "/home/dhamit/Documentos/MYCreIAtedAPPs", "-p", prompt],
+                stdin=subprocess.DEVNULL,
                 stdout=log_f,
                 stderr=subprocess.STDOUT,
                 cwd=BASE_DIR,

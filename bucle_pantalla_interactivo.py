@@ -345,6 +345,19 @@ FRASES_YA_POSTULADO = [
     "postulación recibida", "ver tu postulación", "you already applied",
 ]
 
+
+def _texto_indica_ya_postulado(body_low: str, url: str = "") -> bool:
+    """Detecta si el texto de la página indica postulación previa (incluyendo 'Postulado el DD/MM/YYYY' de Laborum)."""
+    if not body_low:
+        return False
+    if any(w in body_low for w in FRASES_YA_POSTULADO):
+        return True
+    if re.search(r'\bpostulad[oa]\s+el\s+\d{1,2}[/-]\d{1,2}', body_low):
+        return True
+    if "laborum" in (url or "").lower() and "ver estadísticas" in body_low:
+        return True
+    return False
+
 FRASES_CONFIRMACION_ENVIO = [
     "postulación exitosa", "postulacion exitosa", "solicitud completada",
     "postulación completada", "postulacion completada", "postulación enviada",
@@ -474,7 +487,7 @@ _WIDGET_JS = """
         }
         return;
     }
-    const WIDGET_VER = '4.5';
+    const WIDGET_VER = '4.6';
     window.__autopostula_widget_version = WIDGET_VER;
     if (window.__autopostula_interval && window.__autopostula_interval_ver !== WIDGET_VER) {
         clearInterval(window.__autopostula_interval);
@@ -613,6 +626,8 @@ _WIDGET_JS = """
                 flex-direction: column !important;
                 gap: 9px !important;
                 width: 335px !important;
+                max-height: 82vh !important;
+                overflow-y: auto !important;
                 background: rgba(13, 17, 28, 0.98) !important;
                 border: 2px solid #38bdf8 !important;
                 box-shadow: 0 10px 40px rgba(0, 0, 0, 0.9), 0 0 30px rgba(56, 189, 248, 0.4) !important;
@@ -679,7 +694,7 @@ _WIDGET_JS = """
                         ⬅️ Link anterior
                     </button>
                     <button id="autopostula-modal-next" style="flex:1; background:#0369a1; border:1px solid rgba(56,189,248,0.45); border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:7px 6px; cursor:pointer;">
-                        ⏭️ Continuar siguiente
+                        ⏭️ Siguiente oferta
                     </button>
                 </div>
 
@@ -870,7 +885,8 @@ _WIDGET_JS = """
                     bodySnippet: (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, 1800)
                 };
                 window.__autopostula_paused = true;
-                window.__autopostula_inv_status = '⏳ Agente investigador analizando esta pestaña...';
+                window.__autopostula_inv_status = '📨 Nota enviada: el Agente Investigador ya está revisando...';
+                if (noteEl) noteEl.value = '';
                 updateWidgetState();
                 pushCmd('call_investigator', payload);
                 if (typeof window.__autopostula_host_cmd !== 'function') {
@@ -1119,7 +1135,7 @@ async def sincronizar_widgets_navegador(browser):
                 return {
                     ready: (
                         typeof window.__autopostula_sync_state === 'function' &&
-                        window.__autopostula_widget_version === '4.5' &&
+                        window.__autopostula_widget_version === '4.6' &&
                         document.querySelectorAll('#autopostula-root-container').length === 1 &&
                         !!document.getElementById('autopostula-modal-readqa')
                     ),
@@ -1311,7 +1327,7 @@ async def pulsar_primer_postula(page) -> bool:
     # En SPAs como Laborum, esperar brevemente hidratación y rellenar sueldo pretendido (=0 para prácticas) si ya está visible
     if "laborum.cl" in page.url.lower():
         try:
-            await page.locator("button:has-text('Postularme'), input#salarioPretendido").first.wait_for(state="visible", timeout=3500)
+            await page.locator("button:has-text('Postulación rápida'), a:has-text('Postulación rápida'), button:has-text('Postularme'), input#salarioPretendido").first.wait_for(state="visible", timeout=4000)
         except Exception:
             pass
         try:
@@ -1327,6 +1343,9 @@ async def pulsar_primer_postula(page) -> bool:
 
     selectores = [
         "button.btn.primary-btn.blue.aim",
+        "button:has-text('Postulación rápida')",
+        "a:has-text('Postulación rápida')",
+        "[role='button']:has-text('Postulación rápida')",
         "button:has-text('Postula fácil')",
         "button:has-text('Postularme')",
         "a:has-text('Postularme')",
@@ -1388,6 +1407,8 @@ async def pulsar_primer_postula(page) -> bool:
             return (
                 txt === 'postular' ||
                 txt === 'postularme' ||
+                txt === 'postulación rápida' ||
+                txt === 'postulacion rapida' ||
                 txt === 'postularse' ||
                 txt.includes('postula fácil') ||
                 txt.includes('postular a esta vacante') ||
@@ -1442,6 +1463,8 @@ async def pulsar_segundo_postular(page) -> bool:
         "form.formularioPreguntasOferta button:has-text('Postular')",
         ".modal.show button:has-text('Postular')",
         "button:has-text('Enviar postulación')",
+        "button:has-text('Postulación rápida')",
+        "a:has-text('Postulación rápida')",
         "button:has-text('Confirmar postulación')",
         "button:has-text('Finalizar postulación')",
         "#btnKiller",
@@ -1735,6 +1758,76 @@ async def manejar_redireccion_externa(page):
     return page
 
 
+async def _actualizar_cv_laborum_si_pide(page, offer_url: str = "") -> bool:
+    """Maneja el modal de Laborum 'Es necesario que actualices tu CV -> Actualizar mi CV -> Jobi PDF -> Convertir CV -> Reemplazar contenido' y regresa a la oferta."""
+    u_low = (page.url or "").lower()
+    if "laborum" not in u_low:
+        return False
+    try:
+        bt = (await page.inner_text("body") or "").lower()
+    except Exception:
+        return False
+    if "actualices tu cv" not in bt and "actualizar mi cv" not in bt:
+        return False
+
+    print("📄 Laborum solicitó 'Actualizar mi CV'. Ejecutando flujo automático Jobi...")
+    try:
+        btn_act = page.locator("button:has-text('Actualizar mi CV'), a:has-text('Actualizar mi CV')").first
+        if await btn_act.count() > 0 and await btn_act.is_visible():
+            await btn_act.click(timeout=5000)
+            await asyncio.sleep(3.0)
+
+        jobi = page.locator("button:has-text('Actualiza tu CV con Jobi')").first
+        if await jobi.count() > 0 and await jobi.is_visible():
+            await jobi.click(timeout=5000)
+            await asyncio.sleep(1.5)
+            cont = page.locator("button:text-is('Continuar')").first
+            if await cont.count() > 0 and await cont.is_visible():
+                await cont.click(timeout=5000)
+                await asyncio.sleep(2.5)
+
+        if "/actualizarcv" in (page.url or "").lower():
+            cv_ruta = _cargar_perfil_usuario().get("ruta_cv") or CV_MASTER_PDF
+            fi = page.locator("input[type='file']").first
+            if await fi.count() > 0 and os.path.exists(cv_ruta):
+                await fi.set_input_files(cv_ruta)
+                await asyncio.sleep(1.5)
+            conv = page.locator("button:has-text('Convertir CV')").first
+            if await conv.count() > 0 and await conv.is_visible():
+                await conv.click(timeout=5000)
+                await asyncio.sleep(7.0)
+            for _ in range(12):
+                if "/postulantes/curriculum" in (page.url or "").lower() and "/actualizarcv" not in (page.url or "").lower():
+                    break
+                clicked_step = False
+                for s_btn in [
+                    "button:text-is('Continuar')",
+                    "button:has-text('Reemplazar contenido')",
+                    "button:has-text('Finalizar')",
+                    "button:has-text('Guardar')",
+                ]:
+                    l_b = page.locator(s_btn).first
+                    if await l_b.count() > 0 and await l_b.is_visible():
+                        await l_b.click(timeout=5000)
+                        await asyncio.sleep(2.5)
+                        clicked_step = True
+                        break
+                if not clicked_step:
+                    break
+
+        if offer_url and offer_url.startswith("http"):
+            print("🔁 CV actualizado en Laborum. Volviendo a la oferta original...")
+            await page.goto(offer_url, wait_until="domcontentloaded", timeout=25000)
+            await asyncio.sleep(2.0)
+            await inyectar_boton_flotante_control(page)
+            await pulsar_primer_postula(page)
+            await asyncio.sleep(2.5)
+        return True
+    except Exception as e:
+        print(f"Aviso actualizando CV en Laborum: {e}")
+        return False
+
+
 async def manejar_autenticacion_portal(page, empresa: str = "", solo_auto: bool = False):
     """
     Maneja el inicio de sesión o creación de cuenta en portales externos siguiendo el orden solicitado:
@@ -1994,7 +2087,10 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
             try:
                 f_info = await f_el.evaluate(r'''el => {
                     if (el.dataset.autopostulaFilled === '1') return {skip: true};
-                    let txt = ((el.id || '') + ' ' + (el.name || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
+                    const acc = (el.accept || '').toLowerCase();
+                    const idn = ((el.id || '') + ' ' + (el.name || '')).toLowerCase();
+                    if (acc.includes('image/') || /photo|foto|avatar|camera/.test(idn)) return {skip: true};
+                    let txt = (idn + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
                     let p = el.parentElement;
                     for (let k = 0; k < 4 && p; k++) {
                         txt += ' ' + (p.innerText || '').toLowerCase().slice(0, 200);
@@ -3175,7 +3271,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
 
         # Comprobar si ya está postulado o cerrada
         body_text = (await page.inner_text("body") or "").lower()
-        if any(w in body_text for w in FRASES_YA_POSTULADO):
+        if _texto_indica_ya_postulado(body_text, page.url):
             return "ya_postulado", "Ya estabas postulado previamente a esta oferta"
 
         if any(w in body_text for w in FRASES_CERRADA) and not _parece_login_pagina(page.url, body_text):
@@ -3239,7 +3335,9 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         return "cerrada", "Redirigió a página comercial / publicidad (no es oferta laboral)"
     if clic_inicial and ("/candidate/postapply" in page.url.lower() or "postulaste correctamente" in body_tras_clic or "te deseamos mucho éxito" in body_tras_clic):
         return "ok", f"Postulación 1-clic confirmada en {portal} (sin preguntas previas)"
-    if any(w in body_tras_clic for w in FRASES_YA_POSTULADO):
+    if await _actualizar_cv_laborum_si_pide(page, url):
+        body_tras_clic = (await page.inner_text("body") or "").lower()
+    if _texto_indica_ya_postulado(body_tras_clic, page.url):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras clic inicial)"
 
     if any(w in body_tras_clic for w in FRASES_CERRADA) and not _parece_login_pagina(page.url, body_tras_clic):
@@ -3288,7 +3386,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     # Comprobar tras el inicio de sesión SSO si el portal (ej. Workday) ya registra una postulación previa o oferta cerrada
     try:
         body_post_auth = (await page.inner_text("body") or "").lower()
-        if any(w in body_post_auth for w in FRASES_YA_POSTULADO):
+        if any(w in body_post_auth for w in FRASES_YA_POSTULADO) or _texto_indica_ya_postulado(body_post_auth, page.url):
             return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras login)"
         if any(w in body_post_auth for w in FRASES_CERRADA):
             return "cerrada", "Oferta cerrada o expirada tras iniciar sesión"
@@ -3324,7 +3422,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     qa_list = await avanzar_wizard_linkedin_si_existe(page, empresa, titulo)
     try:
         bt_post_wiz = (await page.inner_text("body") or "").lower()
-        if any(w in bt_post_wiz for w in FRASES_YA_POSTULADO):
+        if any(w in bt_post_wiz for w in FRASES_YA_POSTULADO) or _texto_indica_ya_postulado(bt_post_wiz, page.url):
             return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado al rellenar)"
     except Exception:
         pass
