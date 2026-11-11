@@ -21,6 +21,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -493,7 +494,7 @@ _WIDGET_JS = """
         }
         return;
     }
-    const WIDGET_VER = '4.7';
+    const WIDGET_VER = '4.8';
     window.__autopostula_widget_version = WIDGET_VER;
     if (window.__autopostula_interval && window.__autopostula_interval_ver !== WIDGET_VER) {
         clearInterval(window.__autopostula_interval);
@@ -511,6 +512,7 @@ _WIDGET_JS = """
     window.__autopostula_inv_open = window.__autopostula_inv_open || false;
     window.__autopostula_inv_status = window.__autopostula_inv_status || "";
     window.__autopostula_hovering = false;
+    window.__autopostula_last_sync = Date.now();
 
     function pushCmd(action, value = null) {
         if (typeof window.__autopostula_host_cmd === 'function') {
@@ -951,6 +953,7 @@ _WIDGET_JS = """
     window.__ensure_autopostula_widget = createOrAttachWidget;
     window.__autopostula_sync_state = (st) => {
         window.__autopostula_disabled = false;
+        window.__autopostula_last_sync = Date.now();
         window.__autopostula_paused = !!st.paused;
         window.__autopostula_stop = !!st.stop;
         window.__autopostula_timer_text = st.timer_text || '30s';
@@ -974,7 +977,16 @@ _WIDGET_JS = """
 
     if (!window.__autopostula_interval) {
         window.__autopostula_interval_ver = WIDGET_VER;
-        window.__autopostula_interval = setInterval(createOrAttachWidget, 600);
+        window.__autopostula_interval = setInterval(() => {
+            if (Date.now() - (window.__autopostula_last_sync || 0) > 10000) {
+                window.__autopostula_disabled = true;
+                clearInterval(window.__autopostula_interval);
+                window.__autopostula_interval = null;
+                document.querySelectorAll('#autopostula-root-container, #autopostula-floating-control').forEach(e => e.remove());
+                return;
+            }
+            createOrAttachWidget();
+        }, 600);
     }
 })();
 """
@@ -1182,7 +1194,7 @@ async def sincronizar_widgets_navegador(browser):
                 return {
                     ready: (
                         typeof window.__autopostula_sync_state === 'function' &&
-                        window.__autopostula_widget_version === '4.7' &&
+                        window.__autopostula_widget_version === '4.8' &&
                         document.querySelectorAll('#autopostula-root-container').length === 1 &&
                         !!document.getElementById('autopostula-modal-readqa')
                     ),
@@ -3832,10 +3844,25 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
     total = len(ofertas)
 
     if total == 0:
-        msg_empty = f"No hay más ofertas pendientes en {solo_portal}." if solo_portal else "No hay más ofertas pendientes en la Región Metropolitana."
+        try:
+            async with async_playwright() as p_clean:
+                b_clean = await p_clean.chromium.connect_over_cdp("http://localhost:9222")
+                await desactivar_widgets_navegador(b_clean)
+        except Exception:
+            pass
+        msg_empty = f"No hay más ofertas pendientes en {solo_portal}." if solo_portal else "No hay más ofertas válidas pendientes en la Región Metropolitana. Todas están al día."
         print(f"✅ {msg_empty}")
         hablar(msg_empty, final=True)
         return
+
+    def _on_sig(_signum, _frame):
+        GLOBAL_BOT_CONTROL["stop"] = True
+
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(_sig, _on_sig)
+        except Exception:
+            pass
 
     print("==========================================================")
     print(f"🚀 INICIANDO BUCLE DE POSTULACIÓN EN PANTALLA (REGIÓN METROPOLITANA)")
@@ -3886,6 +3913,26 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
 
         exitosas = 0
         cerradas = 0
+        hb_stop = asyncio.Event()
+
+        async def _heartbeat_loop():
+            while not hb_stop.is_set() and not GLOBAL_BOT_CONTROL["stop"]:
+                try:
+                    for ctx_hb in list(browser.contexts):
+                        for pg_hb in list(ctx_hb.pages):
+                            try:
+                                if pg_hb.url and pg_hb.url.startswith("http"):
+                                    await pg_hb.evaluate("() => { if (window.__autopostula_sync_state) window.__autopostula_last_sync = Date.now(); }")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(hb_stop.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass
+
+        hb_task = asyncio.create_task(_heartbeat_loop())
 
         try:
             for i, of in enumerate(ofertas, 1):
@@ -4083,6 +4130,11 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
                 await asyncio.sleep(2.0)
 
         finally:
+            hb_stop.set()
+            try:
+                await asyncio.wait_for(hb_task, timeout=2.0)
+            except Exception:
+                hb_task.cancel()
             await desactivar_widgets_navegador(browser)
 
     print("\n==========================================================")

@@ -147,6 +147,38 @@ def is_daemon_running():
         return False, None
 
 
+def is_bot_running():
+    try:
+        out = subprocess.check_output(["pgrep", "-f", "bucle_pantalla_interactivo.py"]).decode().strip()
+        pids = [int(p) for p in out.splitlines() if p.strip()]
+        return (len(pids) > 0), (pids[0] if pids else None)
+    except Exception:
+        return False, None
+
+
+def contar_pendientes_validas():
+    try:
+        from bucle_pantalla_interactivo import obtener_ofertas_validas_pendientes
+        return len(obtener_ofertas_validas_pendientes(limite=500))
+    except Exception:
+        return 0
+
+
+def hablar_no_bloqueante(msg: str):
+    try:
+        di_bin = "/home/dhamit/.local/bin/Di"
+        if os.path.exists(di_bin):
+            def _run(txt: str):
+                try:
+                    p_di = subprocess.Popen([di_bin], stdin=subprocess.PIPE, text=True)
+                    p_di.communicate(input=txt, timeout=10)
+                except Exception:
+                    pass
+            threading.Thread(target=_run, args=(msg,), daemon=True).start()
+    except Exception:
+        pass
+
+
 def get_stats():
     init_db()
     active, pid = is_daemon_running()
@@ -755,7 +787,8 @@ HTML_PAGE = """<!DOCTYPE html>
             </div>
         </div>
         <div class="top-actions">
-            <button class="btn-emerald" onclick="startInteractiveLoop()" style="background: linear-gradient(135deg, #0284c7, #2563eb); border: none; font-weight:800;" title="Ejecuta el bucle de postulación sobre pantalla con Brave, lectura por voz y widget flotante de 30s">🤖 Bucle en Pantalla (30s)</button>
+            <span id="bot-live-badge" style="padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700; background:rgba(148,163,184,0.16); color:#cbd5e1; border:1px solid rgba(148,163,184,0.3);">⚪ Bot Inactivo</span>
+            <button id="btn-interactive-loop" class="btn-emerald" onclick="startInteractiveLoop()" style="background: linear-gradient(135deg, #0284c7, #2563eb); border: none; font-weight:800;" title="Ejecuta el bucle de postulación sobre pantalla con Brave, lectura por voz y widget flotante de 30s">🤖 Bucle en Pantalla (30s)</button>
             <button class="btn-emerald" onclick="startHeadlessBatch()" style="background: linear-gradient(135deg, #059669, #10b981); border: none; font-weight:800;" title="Postula automáticamente a todas las ofertas válidas en segundo plano sin pausar">⚡ Postular Todas (Segundo Plano)</button>
             <button class="btn-danger" onclick="stopBotProcess()" style="background: #ef4444; color: white; border: none; font-weight:800; border-radius:8px; padding:6px 12px; cursor:pointer;" title="Detiene cualquier proceso activo del bot de pantalla">🛑 Detener Bot</button>
             <button class="btn-emerald" onclick="openNextBatch()">🚀 Abrir Lote 10 en Brave</button>
@@ -1185,28 +1218,28 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     async function startInteractiveLoop() {
-        showToast("🚀 Iniciando bucle interactivo sobre pantalla en Brave (30s)...");
+        showToast("🚀 Verificando cola y lanzando bucle interactivo (30s)...");
         const res = await fetch("/api/start-interactive-loop", { method: "POST" });
         const d = await res.json();
         if (d.ok) {
-            showToast("✅ Bucle interactivo iniciado en pantalla.");
+            showToast("✅ Bucle interactivo iniciado en pantalla (" + (d.pendientes ?? "") + " ofertas).");
         } else {
-            showToast("❌ Error al iniciar: " + (d.error || "Desconocido"));
+            showToast("⚠️ " + (d.error || "No se pudo iniciar"));
         }
-        setTimeout(refreshAll, 3000);
+        setTimeout(refreshAll, 2000);
     }
 
     async function startHeadlessBatch() {
         if (!confirm("¿Deseas iniciar la postulación continua en segundo plano para todas las ofertas válidas de la RM?")) return;
-        showToast("⚡ Iniciando postulación en segundo plano...");
+        showToast("⚡ Verificando cola y lanzando postulación en segundo plano...");
         const res = await fetch("/api/start-headless-batch", { method: "POST" });
         const d = await res.json();
         if (d.ok) {
             showToast("✅ Postulación en segundo plano ejecutándose.");
         } else {
-            showToast("❌ Error al iniciar: " + (d.error || "Desconocido"));
+            showToast("⚠️ " + (d.error || "No se pudo iniciar"));
         }
-        setTimeout(refreshAll, 3000);
+        setTimeout(refreshAll, 2000);
     }
 
     async function stopBotProcess() {
@@ -1214,7 +1247,7 @@ HTML_PAGE = """<!DOCTYPE html>
         const res = await fetch("/api/stop-bot", { method: "POST" });
         const d = await res.json();
         showToast(d.ok ? "🛑 Procesos del bot detenidos." : "No había procesos activos.");
-        setTimeout(refreshAll, 2000);
+        setTimeout(refreshAll, 1500);
     }
 
     async function openNextBatch() {
@@ -1245,9 +1278,31 @@ HTML_PAGE = """<!DOCTYPE html>
         refreshAll();
     }
 
+    async function loadBotStatus() {
+        try {
+            const res = await fetch("/api/bot-status");
+            const d = await res.json();
+            const badge = document.getElementById("bot-live-badge");
+            if (badge) {
+                if (d.running) {
+                    badge.innerText = "🟢 Bot Activo (PID " + d.pid + ")";
+                    badge.style.background = "rgba(16,185,129,0.2)";
+                    badge.style.color = "#34d399";
+                    badge.style.borderColor = "rgba(16,185,129,0.45)";
+                } else {
+                    badge.innerText = "⚪ Bot Inactivo · " + (d.pendientes_validas ?? 0) + " válidas TI en cola";
+                    badge.style.background = "rgba(148,163,184,0.16)";
+                    badge.style.color = "#cbd5e1";
+                    badge.style.borderColor = "rgba(148,163,184,0.3)";
+                }
+            }
+        } catch (e) {}
+    }
+
     async function refreshAll() {
         const conteo = await loadStats();
         await Promise.all([
+            loadBotStatus(),
             loadPortales(conteo),
             loadPostulaciones(),
             loadLogs()
@@ -1580,6 +1635,14 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/logs":
             init_db()
             self._send_json(obtener_logs_scheduler(limit=30))
+        elif parsed.path == "/api/bot-status":
+            running, pid = is_bot_running()
+            self._send_json({
+                "ok": True,
+                "running": running,
+                "pid": pid,
+                "pendientes_validas": contar_pendientes_validas(),
+            })
         elif parsed.path == "/api/agente-investigador":
             ult, res_ult = None, None
             for p_src, k in [(os.path.join(INVESTIGACIONES_DIR, "ultimo.json"), "req"), (os.path.join(INVESTIGACIONES_DIR, "ultimo_resultado.json"), "res")]:
@@ -1629,6 +1692,15 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/api/start-interactive-loop":
             try:
+                running, pid = is_bot_running()
+                if running:
+                    self._send_json({"ok": False, "already_running": True, "error": f"El bot ya está activo en pantalla (PID {pid})."})
+                    return
+                pend = contar_pendientes_validas()
+                if pend == 0:
+                    hablar_no_bloqueante("No hay ofertas válidas pendientes en cola. Usa Escanear 14 Portales primero o revisa las pausadas en el panel.")
+                    self._send_json({"ok": False, "empty_queue": True, "pendientes": 0, "error": "No hay ofertas válidas pendientes (RM + Perfil TI). Pulsa '🌐 Escanear 14 Portales Ahora' o revisa las pausadas/CAPTCHA."})
+                    return
                 env = os.environ.copy()
                 env["DISPLAY"] = ":0"
                 env["XAUTHORITY"] = "/home/dhamit/.Xauthority"
@@ -1638,12 +1710,21 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
-                self._send_json({"ok": True, "modo": "interactivo"})
+                self._send_json({"ok": True, "modo": "interactivo", "pendientes": pend})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
 
         elif parsed.path == "/api/start-headless-batch":
             try:
+                running, pid = is_bot_running()
+                if running:
+                    self._send_json({"ok": False, "already_running": True, "error": f"El bot ya está activo (PID {pid})."})
+                    return
+                pend = contar_pendientes_validas()
+                if pend == 0:
+                    hablar_no_bloqueante("No hay ofertas válidas pendientes en cola para postular en segundo plano.")
+                    self._send_json({"ok": False, "empty_queue": True, "pendientes": 0, "error": "No hay ofertas válidas pendientes (RM + Perfil TI). Pulsa '🌐 Escanear 14 Portales Ahora'."})
+                    return
                 env = os.environ.copy()
                 env["DISPLAY"] = ":0"
                 env["XAUTHORITY"] = "/home/dhamit/.Xauthority"
@@ -1653,13 +1734,13 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
-                self._send_json({"ok": True, "modo": "segundo_plano"})
+                self._send_json({"ok": True, "modo": "segundo_plano", "pendientes": pend})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
 
         elif parsed.path == "/api/stop-bot":
             try:
-                subprocess.run(["pkill", "-f", "bucle_pantalla_interactivo.py"], check=False)
+                subprocess.run(["pkill", "-SIGTERM", "-f", "bucle_pantalla_interactivo.py"], check=False)
                 self._send_json({"ok": True})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
