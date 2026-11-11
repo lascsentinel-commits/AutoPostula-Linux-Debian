@@ -280,6 +280,17 @@ def obtener_ofertas_validas_pendientes(limite: int = 100, solo_id: int = None, s
     return filtradas[:limite]
 
 
+def _parece_login_pagina(url: str, body_text: str = "") -> bool:
+    """Detecta si el portal está pidiendo iniciar sesión en lugar de mostrar una oferta cerrada."""
+    u = (url or "").lower()
+    if any(k in u for k in ("/ingresar", "/login", "/signin", "/sign-in", "/usuarios/ingresar", "/auth/", "accounts.google.com")):
+        return True
+    bt = (body_text or "").lower()[:4000]
+    tiene_login = any(k in bt for k in ("iniciar sesión", "inicia sesión", "iniciar sesión con google", "acceder con google", "olvidaste tu contraseña", "sign in to"))
+    tiene_cerrada = any(k in bt for k in ("oferta cerrada", "ya no se aceptan solicitudes", "este anuncio ha expirado"))
+    return tiene_login and not tiene_cerrada
+
+
 def es_url_catalogo(url: str, portal: str = "") -> bool:
     """Detecta si la URL actual es una página de catálogo, búsqueda o lista general de ofertas."""
     if not url:
@@ -3167,7 +3178,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         if any(w in body_text for w in FRASES_YA_POSTULADO):
             return "ya_postulado", "Ya estabas postulado previamente a esta oferta"
 
-        if any(w in body_text for w in FRASES_CERRADA):
+        if any(w in body_text for w in FRASES_CERRADA) and not _parece_login_pagina(page.url, body_text):
             print("⚠️  Detectado mensaje de oferta cerrada o finalizada en el portal.")
             return "cerrada", "Oferta cerrada o expirada en el portal"
 
@@ -3231,8 +3242,11 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if any(w in body_tras_clic for w in FRASES_YA_POSTULADO):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras clic inicial)"
 
-    if any(w in body_tras_clic for w in FRASES_CERRADA):
+    if any(w in body_tras_clic for w in FRASES_CERRADA) and not _parece_login_pagina(page.url, body_tras_clic):
         return "cerrada", "Oferta cerrada o expirada en el portal (detectado tras clic inicial)"
+
+    if _parece_login_pagina(page.url, body_tras_clic):
+        hablar(f"Falta iniciar sesión en {portal}. Intentando ingreso automático con Google o pausando para que inicies sesión.")
 
     # Comprobar si el portal externo presenta CAPTCHA antibot (Cloudflare Turnstile / reCAPTCHA / hCaptcha)
     await asyncio.sleep(0.8)
@@ -3249,11 +3263,27 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         return "captcha_antibot", f"Portal externo requiere verificación humana / CAPTCHA manual: {page.url}"
 
     # Intentar flujo automático de autenticación (Google OAuth correof1553 -> Probar otro método x2 -> Bitwarden -> Pausa interactiva)
+    url_antes_auth = page.url
     page, auth_ok, auth_mot = await manejar_autenticacion_portal(page, empresa, solo_auto=False)
     if page not in tabs_oferta:
         tabs_oferta.append(page)
     if not auth_ok and auth_mot == "stop":
         return "stop", "Bot detenido por el usuario durante inicio de sesión"
+
+    # Si venía de un muro de login y tras autenticarse redirigió al home/catálogo u otra oferta, volver a la URL original y pulsar Postular
+    if _parece_login_pagina(url_antes_auth, body_tras_clic) and auth_mot in ("autenticado_ok", "autenticado_manual"):
+        u_now = (page.url or "").split("?")[0].rstrip("/").lower()
+        u_obj = (url or "").split("?")[0].rstrip("/").lower()
+        if u_now != u_obj and not ("/apply" in u_now or "myworkdayjobs.com" in u_now or "applyct" in u_now):
+            try:
+                print(f"🔁 Sesión iniciada en {portal}. Volviendo a la oferta original para postular...")
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(2.0)
+                await inyectar_boton_flotante_control(page)
+                await pulsar_primer_postula(page)
+                await asyncio.sleep(2.5)
+            except Exception as e:
+                print(f"Aviso regresando a la oferta tras login: {e}")
 
     # Comprobar tras el inicio de sesión SSO si el portal (ej. Workday) ya registra una postulación previa o oferta cerrada
     try:
