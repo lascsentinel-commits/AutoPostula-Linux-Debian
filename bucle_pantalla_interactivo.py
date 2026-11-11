@@ -340,7 +340,7 @@ FRASES_YA_POSTULADO = [
     "ya estás participando en el proceso", "ya ha sido utilizado para postularte",
     "ya ha realizado una solicitud", "ya has realizado una solicitud",
     "you have already applied", "ya te has postulado", "ya has postulado",
-    "ya estás postulado", "ya te postulaste", "ya postulaste",
+    "ya estás postulado", "ya te postulaste", "ya postulaste", "postulaste correctamente",
     "postulación enviada", "solicitud enviada", "candidatura enviada",
     "postulación recibida", "ver tu postulación", "you already applied",
 ]
@@ -354,7 +354,7 @@ FRASES_CONFIRMACION_ENVIO = [
     "tu postulación fue recibida", "postulación recibida", "solicitud recibida",
     "enviada correctamente", "gracias por postular", "gracias por su solicitud",
     "gracias por tu solicitud", "hemos recibido su solicitud", "gracias por aplicar",
-    "te postulaste correctamente", "has postulado con éxito", "ya te has postulado", "ya has postulado",
+    "te postulaste correctamente", "postulaste correctamente", "te deseamos mucho éxito", "has postulado con éxito", "ya te has postulado", "ya has postulado",
     "ya estás postulado", "ya postulaste", "postular de nuevo",
     "usted ya ha presentado solicitud", "ya ha presentado solicitud",
     "ya estás participando en el proceso", "ya ha sido utilizado para postularte",
@@ -3237,7 +3237,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if es_pagina_comercial_no_laboral(page.url, body_tras_clic):
         print(f"⚠️  Se detectó redirección comercial o no laboral ({page.url[:70]}). Cerrando sin postular.")
         return "cerrada", "Redirigió a página comercial / publicidad (no es oferta laboral)"
-    if clic_inicial and ("/candidate/postapply" in page.url.lower() or "te postulaste correctamente" in body_tras_clic):
+    if clic_inicial and ("/candidate/postapply" in page.url.lower() or "postulaste correctamente" in body_tras_clic or "te deseamos mucho éxito" in body_tras_clic):
         return "ok", f"Postulación 1-clic confirmada en {portal} (sin preguntas previas)"
     if any(w in body_tras_clic for w in FRASES_YA_POSTULADO):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras clic inicial)"
