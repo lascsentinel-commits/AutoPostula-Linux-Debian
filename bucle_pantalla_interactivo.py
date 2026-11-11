@@ -340,7 +340,7 @@ FRASES_YA_POSTULADO = [
     "ya estás participando en el proceso", "ya ha sido utilizado para postularte",
     "ya ha realizado una solicitud", "ya has realizado una solicitud",
     "you have already applied", "ya te has postulado", "ya has postulado",
-    "ya estás postulado", "ya te postulaste", "ya postulaste", "postulaste correctamente",
+    "ya estás postulado", "ya estás postulando", "ya estas postulando", "ya te postulaste", "ya postulaste", "postulaste correctamente",
     "postulación enviada", "solicitud enviada", "candidatura enviada",
     "postulación recibida", "ver tu postulación", "you already applied",
 ]
@@ -354,7 +354,7 @@ FRASES_CONFIRMACION_ENVIO = [
     "tu postulación fue recibida", "postulación recibida", "solicitud recibida",
     "enviada correctamente", "gracias por postular", "gracias por su solicitud",
     "gracias por tu solicitud", "hemos recibido su solicitud", "gracias por aplicar",
-    "te postulaste correctamente", "postulaste correctamente", "te deseamos mucho éxito", "has postulado con éxito", "ya te has postulado", "ya has postulado",
+    "te postulaste correctamente", "postulaste correctamente", "te deseamos mucho éxito", "has postulado con éxito", "ya te has postulado", "ya has postulado", "ya estás postulando", "ya estas postulando",
     "ya estás postulado", "ya postulaste", "postular de nuevo",
     "usted ya ha presentado solicitud", "ya ha presentado solicitud",
     "ya estás participando en el proceso", "ya ha sido utilizado para postularte",
