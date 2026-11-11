@@ -10,9 +10,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 PORT = 8087
@@ -105,13 +106,6 @@ def _disparar_investigacion(data: dict) -> dict:
         f"4) Anuncia el hallazgo y resultado en voz alta ejecutando /home/dhamit/.local/bin/Di --final."
     )
     try:
-        di_bin = "/home/dhamit/.local/bin/Di"
-        if os.path.exists(di_bin):
-            p_di = subprocess.Popen([di_bin], stdin=subprocess.PIPE, text=True)
-            p_di.communicate(input=f"Agente investigador activado para {report['empresa'] or 'esta oferta'}. Ya recibí tu nota y estoy analizando la pestaña.")
-    except Exception:
-        pass
-    try:
         with open(log_path, "w", encoding="utf-8") as log_f:
             subprocess.Popen(
                 [agy_bin, "--dangerously-skip-permissions", "--mode", "accept-edits", "--add-dir", "/home/dhamit/Documentos/MYCreIAtedAPPs", "-p", prompt],
@@ -125,6 +119,22 @@ def _disparar_investigacion(data: dict) -> dict:
     except Exception as e:
         launched = False
         report["launch_error"] = str(e)
+    try:
+        di_bin = "/home/dhamit/.local/bin/Di"
+        if launched and os.path.exists(di_bin):
+            def _hablar_inv(msg_inv: str):
+                try:
+                    p_di = subprocess.Popen([di_bin], stdin=subprocess.PIPE, text=True)
+                    p_di.communicate(input=msg_inv, timeout=10)
+                except Exception:
+                    pass
+            threading.Thread(
+                target=_hablar_inv,
+                args=(f"Agente investigador activado para {report['empresa'] or 'esta oferta'}. Ya recibí tu nota y estoy analizando la pestaña.",),
+                daemon=True,
+            ).start()
+    except Exception:
+        pass
     return {"ok": True, "launched": launched, "report": report}
 
 
@@ -1504,17 +1514,26 @@ loadMemoria();
 
 
 class AutoPostulaHandler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        try:
+            self.request.settimeout(15)
+        except Exception:
+            pass
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
 
     def _send_json(self, payload, status=200):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -1726,8 +1745,9 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
 
 def run():
     init_db()
-    HTTPServer.allow_reuse_address = True
-    server = HTTPServer(("0.0.0.0", PORT), AutoPostulaHandler)
+    ThreadingHTTPServer.allow_reuse_address = True
+    ThreadingHTTPServer.daemon_threads = True
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), AutoPostulaHandler)
     print("=" * 64)
     print(f"🎯 AutoPostula NOC Dashboard (14 Portales) activo en:")
     print(f"   👉 http://localhost:{PORT}")

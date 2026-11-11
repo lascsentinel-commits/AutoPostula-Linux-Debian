@@ -287,7 +287,7 @@ def _parece_login_pagina(url: str, body_text: str = "") -> bool:
         return True
     bt = (body_text or "").lower()[:4000]
     tiene_login = any(k in bt for k in ("iniciar sesión", "inicia sesión", "iniciar sesión con google", "acceder con google", "olvidaste tu contraseña", "sign in to"))
-    tiene_cerrada = any(k in bt for k in ("oferta cerrada", "ya no se aceptan solicitudes", "este anuncio ha expirado"))
+    tiene_cerrada = any(w in bt for w in FRASES_CERRADA)
     return tiene_login and not tiene_cerrada
 
 
@@ -334,6 +334,10 @@ FRASES_CERRADA = [
     "oferta pausada", "no se encuentra disponible", "lo sentimos! esta oferta",
     "lo sentimos, esta oferta", "esta oferta ya no", "no disponible actualmente",
     "no podemos encontrar esta página", "esta página no existe",
+    "no está disponible en este momento", "la oferta ya no existe",
+    "esta oferta ya no existe", "el aviso ya no existe",
+    "página ya no existe", "empleo ya no está disponible",
+    "vacante cerrada", "postulación cerrada", "ver el aviso finalizado",
     "página no encontrada", "page not found"
 ]
 
@@ -489,7 +493,7 @@ _WIDGET_JS = """
         }
         return;
     }
-    const WIDGET_VER = '4.6';
+    const WIDGET_VER = '4.7';
     window.__autopostula_widget_version = WIDGET_VER;
     if (window.__autopostula_interval && window.__autopostula_interval_ver !== WIDGET_VER) {
         clearInterval(window.__autopostula_interval);
@@ -511,7 +515,9 @@ _WIDGET_JS = """
     function pushCmd(action, value = null) {
         if (typeof window.__autopostula_host_cmd === 'function') {
             try {
-                window.__autopostula_host_cmd(action, value);
+                Promise.resolve(window.__autopostula_host_cmd(action, value)).catch(() => {
+                    window.__autopostula_pending_cmd = { action, value, ts: Date.now() };
+                });
                 return;
             } catch(e) {}
         }
@@ -887,17 +893,25 @@ _WIDGET_JS = """
                     bodySnippet: (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, 1800)
                 };
                 window.__autopostula_paused = true;
-                window.__autopostula_inv_status = '📨 Nota enviada: el Agente Investigador ya está revisando...';
+                window.__autopostula_inv_status = '📨 Enviando nota al Agente Investigador...';
                 if (noteEl) noteEl.value = '';
                 updateWidgetState();
                 pushCmd('call_investigator', payload);
-                if (typeof window.__autopostula_host_cmd !== 'function') {
-                    fetch('http://localhost:8087/api/agente-investigador', {
+                try {
+                    const invCtrl = new AbortController();
+                    setTimeout(() => invCtrl.abort(), 2500);
+                    fetch('http://127.0.0.1:8087/api/agente-investigador', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
+                        body: JSON.stringify(payload),
+                        signal: invCtrl.signal
+                    }).then(r => r.json()).then(d => {
+                        if (d && d.ok) {
+                            window.__autopostula_inv_status = '📨 Nota recibida: Agente Investigador analizando esta pestaña...';
+                            updateWidgetState();
+                        }
                     }).catch(() => {});
-                }
+                } catch(e) {}
             });
 
             modal.querySelector('#autopostula-modal-memory')?.addEventListener('click', (e) => {
@@ -1061,6 +1075,36 @@ async def gestionar_limite_pestanas(browser, max_tabs: int | None = None, tabs_p
     return cerradas
 
 
+def _despachar_investigacion_async(inv_pl: dict):
+    """Enriquece con la oferta actual y envía de inmediato el payload al Agente Investigador (sin esperar ciclo de polling)."""
+    of_act = GLOBAL_BOT_CONTROL.get("oferta_actual") or {}
+    inv_pl.setdefault("oferta_id", of_act.get("id"))
+    inv_pl.setdefault("empresa", of_act.get("empresa") or "")
+    inv_pl.setdefault("titulo", of_act.get("titulo") or "")
+    inv_pl.setdefault("portal", of_act.get("portal") or "")
+    inv_pl.setdefault("url_oferta", of_act.get("url_oferta") or "")
+    GLOBAL_BOT_CONTROL["investigate_protect_url"] = inv_pl.get("url") or ""
+
+    def _post_inv(pl):
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:8087/api/agente-investigador",
+                data=json.dumps(pl, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                if resp.status == 200:
+                    GLOBAL_BOT_CONTROL["inv_status"] = "📨 Nota recibida: Agente Investigador analizando esta pestaña..."
+        except Exception as ex:
+            GLOBAL_BOT_CONTROL["inv_status"] = f"⚠️ Error llamando Agente Investigador: {str(ex)[:60]}"
+            print(f"Aviso llamando Agente Investigador: {ex}")
+
+    threading.Thread(target=_post_inv, args=(dict(inv_pl),), daemon=True).start()
+    print(f"\n🕵️  Llamado Agente Investigador para #{inv_pl.get('oferta_id')} ({inv_pl.get('empresa')}) | Nota: {inv_pl.get('note', '')[:80]}")
+
+
 def _aplicar_comando_control(act: str, val=None):
     """Aplica de forma atómica e instantánea cualquier comando recibido desde cualquier pestaña o ventana."""
     if act == "pause":
@@ -1098,11 +1142,12 @@ def _aplicar_comando_control(act: str, val=None):
     elif act == "next_offer":
         GLOBAL_BOT_CONTROL["paused"] = False
         GLOBAL_BOT_CONTROL["next_offer"] = True
+        GLOBAL_BOT_CONTROL["timer_text"] = "SIGUIENTE"
     elif act == "call_investigator" and isinstance(val, dict):
         GLOBAL_BOT_CONTROL["paused"] = True
         GLOBAL_BOT_CONTROL["timer_text"] = "INVESTIGA"
         GLOBAL_BOT_CONTROL["inv_status"] = "⏳ Agente investigador analizando esta pestaña..."
-        GLOBAL_BOT_CONTROL["investigate_payload"] = val
+        _despachar_investigacion_async(val)
 
 
 async def sincronizar_widgets_navegador(browser):
@@ -1137,7 +1182,7 @@ async def sincronizar_widgets_navegador(browser):
                 return {
                     ready: (
                         typeof window.__autopostula_sync_state === 'function' &&
-                        window.__autopostula_widget_version === '4.6' &&
+                        window.__autopostula_widget_version === '4.7' &&
                         document.querySelectorAll('#autopostula-root-container').length === 1 &&
                         !!document.getElementById('autopostula-modal-readqa')
                     ),
@@ -1193,33 +1238,12 @@ async def sincronizar_widgets_navegador(browser):
         else:
             hablar("Todavía no hay una oferta anterior registrada en el historial.")
 
-    if GLOBAL_BOT_CONTROL["investigate_payload"]:
-        inv_pl = GLOBAL_BOT_CONTROL["investigate_payload"]
-        GLOBAL_BOT_CONTROL["investigate_payload"] = None
-        of_act = GLOBAL_BOT_CONTROL.get("oferta_actual") or {}
-        inv_pl.setdefault("oferta_id", of_act.get("id"))
-        inv_pl.setdefault("empresa", of_act.get("empresa") or "")
-        inv_pl.setdefault("titulo", of_act.get("titulo") or "")
-        inv_pl.setdefault("portal", of_act.get("portal") or "")
-        inv_pl.setdefault("url_oferta", of_act.get("url_oferta") or "")
+    prot_url = GLOBAL_BOT_CONTROL.pop("investigate_protect_url", None)
+    if prot_url:
         for ctx_b in list(browser.contexts):
             for pg_b in list(ctx_b.pages):
-                if (pg_b.url or "") == (inv_pl.get("url") or ""):
+                if (pg_b.url or "") == prot_url:
                     TABS_PROTEGIDAS_MANUAL.add(pg_b)
-        def _post_inv(pl):
-            import urllib.request
-            try:
-                req = urllib.request.Request(
-                    "http://127.0.0.1:8087/api/agente-investigador",
-                    data=json.dumps(pl, ensure_ascii=False).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                urllib.request.urlopen(req, timeout=8)
-            except Exception as ex:
-                print(f"Aviso llamando Agente Investigador: {ex}")
-        threading.Thread(target=_post_inv, args=(inv_pl,), daemon=True).start()
-        print(f"\n🕵️  Llamado Agente Investigador para #{inv_pl.get('oferta_id')} ({inv_pl.get('empresa')}) | Nota: {inv_pl.get('note', '')[:80]}")
 
     res_inv_path = BASE_DIR / "data" / "investigaciones" / "ultimo_resultado.json"
     if res_inv_path.exists():
@@ -2061,13 +2085,15 @@ async def manejar_autenticacion_portal(page, empresa: str = "", solo_auto: bool 
     print(f"\n🔐 {msg_auth}")
     hablar(msg_auth)
 
-    while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"]:
+    while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"] and not GLOBAL_BOT_CONTROL["next_offer"]:
         if browser:
             await sincronizar_widgets_navegador(browser)
         await asyncio.sleep(0.6)
 
     if GLOBAL_BOT_CONTROL["stop"]:
         return page, False, "stop"
+    if GLOBAL_BOT_CONTROL["next_offer"]:
+        return page, False, "next"
 
     await asyncio.sleep(2.0)
     await inyectar_boton_flotante_control(page)
@@ -3369,6 +3395,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
         tabs_oferta.append(page)
     if not auth_ok and auth_mot == "stop":
         return "stop", "Bot detenido por el usuario durante inicio de sesión"
+    if not auth_ok and auth_mot == "next":
+        return "siguiente", "Avanzado manualmente hacia la siguiente oferta durante inicio de sesión"
 
     # Si venía de un muro de login y tras autenticarse redirigió al home/catálogo u otra oferta, volver a la URL original y pulsar Postular
     if _parece_login_pagina(url_antes_auth, body_tras_clic) and auth_mot in ("autenticado_ok", "autenticado_manual"):
@@ -3650,9 +3678,16 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     motivo_exito = ""
 
     for intento in range(8):
+        if GLOBAL_BOT_CONTROL["stop"]:
+            return "stop", "Bot detenido por el usuario durante verificación final"
+        if GLOBAL_BOT_CONTROL["next_offer"]:
+            return "siguiente", "Avanzado manualmente hacia la siguiente oferta"
         await asyncio.sleep(1.0)
         body_final = (await page.inner_text("body") or "").lower()
         url_final = page.url.lower()
+
+        if any(w in body_final for w in FRASES_CERRADA) and not _parece_login_pagina(url_final, body_final):
+            return "cerrada", "Oferta cerrada, expirada o inexistente en el portal"
 
         if any(w in body_final for w in FRASES_CONFIRMACION_ENVIO) or ("mis-postulaciones" in url_final) or ("match" in url_final):
             es_exito = True
@@ -3703,6 +3738,20 @@ async def _tabs_tienen_confirmacion(tabs_oferta: list) -> bool:
                 continue
             bt = (await pg.inner_text("body") or "").lower()
             if any(w in bt for w in FRASES_CONFIRMACION_ENVIO):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _tabs_tienen_cerrada(tabs_oferta: list) -> bool:
+    """Comprueba si alguna pestaña activa de la oferta muestra mensaje de aviso cerrado o página inexistente."""
+    for pg in list(tabs_oferta):
+        try:
+            if pg.is_closed():
+                continue
+            bt = (await pg.inner_text("body") or "").lower()
+            if any(w in bt for w in FRASES_CERRADA) and not _parece_login_pagina(pg.url, bt):
                 return True
         except Exception:
             pass
@@ -3838,172 +3887,204 @@ async def ejecutar_bucle(segundos_revision: int = 30, max_ofertas: int = 100, so
         exitosas = 0
         cerradas = 0
 
-        for i, of in enumerate(ofertas, 1):
-            if GLOBAL_BOT_CONTROL["paused"] or GLOBAL_BOT_CONTROL["stop"]:
-                st_bucle = await comprobar_pausa_y_parada(ctx.pages[-1] if ctx.pages else None)
-                if st_bucle == "stop":
-                    await desactivar_widgets_navegador(browser)
-                    return
-            of_id = of["id"]
-            titulo = of["titulo"][:45]
-            empresa = of["empresa"][:25]
-            portal = of["portal"]
-            GLOBAL_BOT_CONTROL["next_offer"] = False
-            GLOBAL_BOT_CONTROL["inv_status"] = ""
-            GLOBAL_BOT_CONTROL["oferta_actual"] = of
-            _registrar_historial_oferta(of)
-
-            print(f"\n>>> [{i}/{total}] Procesando oferta #{of_id}: {empresa} - {titulo} ({portal})")
-            page_reusada = None
-            emp_toks = [t for t in re.findall(r'[a-z0-9]{4,}', empresa.lower()) if t not in {"chile", "empresa", "grupo", "servicios", "mercado", "mayorista"}]
-            tit_toks = [t for t in re.findall(r'[a-z0-9]{4,}', titulo.lower()) if t not in {"practica", "ingenieria", "informatica", "chile", "program"}]
-            for pg_cand in list(ctx.pages):
-                if pg_cand.is_closed():
-                    continue
-                cu = (pg_cand.url or "").lower()
-                emp_ok = (not emp_toks) or any(et in cu for et in emp_toks) or (len(emp_toks) >= 2 and "".join(emp_toks[-2:]) in cu)
-                es_workday_app = "myworkdayjobs.com" in cu and "/apply" in cu and emp_ok and any(tk in cu for tk in tit_toks[:3])
-                es_csod_app = "csod.com" in cu and "/application" in cu and emp_ok
-                es_pandape_app = "pandape" in cu and ("/apply" in cu or "/detail/" in cu) and (emp_ok or "".join(re.findall(r'[a-z0-9]+', empresa.lower())[-2:]) in cu)
-                if es_workday_app or es_csod_app or es_pandape_app:
-                    page_reusada = pg_cand
-                    break
-            if page_reusada is not None:
-                page = page_reusada
-                BOT_OWNED_PAGES.add(page)
-                await page.bring_to_front()
-                await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas={page})
-            else:
-                await gestionar_limite_pestanas(browser, max(0, GLOBAL_BOT_CONTROL["max_tabs"] - 1))
-                page = await ctx.new_page()
-                BOT_OWNED_PAGES.add(page)
-            tabs_oferta = [page]
-
-            try:
-                res_tipo, msg = await procesar_oferta_interactiva(page, of, segundos_revision=segundos_revision, tabs_oferta=tabs_oferta)
-            except Exception as e:
-                res_tipo, msg = "error", f"Error en oferta: {str(e)[:60]}"
-            try:
-                if tabs_oferta and not tabs_oferta[-1].is_closed():
-                    _registrar_historial_oferta(of, tabs_oferta[-1].url)
-            except Exception:
-                pass
-
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-
-            if res_tipo == "stop":
-                print("\n🛑 Bucle detenido por completo por el usuario.")
-                hablar("Bot detenido por completo a solicitud del usuario.", final=True)
-                c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Detenido por usuario] {msg}", of_id))
-                conn.commit()
-                conn.close()
-                await desactivar_widgets_navegador(browser)
-                return
-
-            if res_tipo in ["ok", "ya_postulado"]:
-                nuevo_estado = "🟢 Postulado Confirmado"
-                exitosas += 1
-                c.execute(
-                    "UPDATE postulaciones SET estado = ?, fecha_postulacion = ?, metodo_postulacion = 'brave_cdp_pantalla', notas = ? WHERE id = ?",
-                    (nuevo_estado, now_str, f"[CV Maestro Duoc] {msg}", of_id)
-                )
-                conn.commit()
-                espera_post = max(35, int(GLOBAL_BOT_CONTROL.get("segundos", segundos_revision))) if res_tipo == "ok" else 4
-                if not await _esperar_post_envio_y_cerrar(browser, tabs_oferta, empresa, espera_post):
-                    conn.close()
-                    return
-            elif res_tipo == "descartada_desc":
-                nuevo_estado = "⏭️ Descartada (Descripción no compatible)"
-                c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", (nuevo_estado, msg, of_id))
-                conn.commit()
-                for pg_o in tabs_oferta:
-                    try:
-                        await pg_o.close()
-                    except Exception:
-                        pass
-            elif res_tipo == "cerrada":
-                nuevo_estado = "🔴 Oferta Cerrada / Expirada"
-                cerradas += 1
-                c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", (nuevo_estado, msg, of_id))
-                conn.commit()
-                hablar(f"La oferta de {empresa} está cerrada. Pasando a la siguiente.")
-                for pg_o in tabs_oferta:
-                    try:
-                        await pg_o.close()
-                    except Exception:
-                        pass
-            elif res_tipo in ["requiere_login", "captcha_antibot"]:
-                nuevo_estado = "🔑 Requiere Login Manual" if res_tipo == "requiere_login" else "🛡️ Captcha / Verificación Manual"
-                c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", (nuevo_estado, msg, of_id))
-                conn.commit()
-                hablar(f"El portal de {empresa} exige inicio de sesión o verificación humana; guardado en el panel para acceso manual.")
-                for pg_o in tabs_oferta:
-                    try:
-                        await pg_o.close()
-                    except Exception:
-                        pass
-            elif res_tipo == "siguiente":
+        try:
+            for i, of in enumerate(ofertas, 1):
+                if GLOBAL_BOT_CONTROL["paused"] or GLOBAL_BOT_CONTROL["stop"]:
+                    st_bucle = await comprobar_pausa_y_parada(ctx.pages[-1] if ctx.pages else None)
+                    if st_bucle == "stop":
+                        await desactivar_widgets_navegador(browser)
+                        return
+                of_id = of["id"]
+                titulo = of["titulo"][:45]
+                empresa = of["empresa"][:25]
+                portal = of["portal"]
                 GLOBAL_BOT_CONTROL["next_offer"] = False
-                for pg_o in tabs_oferta:
-                    TABS_PROTEGIDAS_MANUAL.add(pg_o)
-                c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Siguiente manual] {msg}", of_id))
-                conn.commit()
-                hablar(f"Pasando a la siguiente oferta tras {empresa}.")
-            else:
-                c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Revisión en pantalla] {msg}", of_id))
-                conn.commit()
-                for pg_o in tabs_oferta:
-                    TABS_PROTEGIDAS_MANUAL.add(pg_o)
-                print(f"⚠️  Oferta #{of_id} NO completó o no confirmó envío automático. PAUSANDO Y MANTENIENDO PESTAÑA ABIERTA.")
-                GLOBAL_BOT_CONTROL["paused"] = True
-                GLOBAL_BOT_CONTROL["timer_text"] = "SIN ENVIAR"
-                traer_brave_al_frente()
-                await sincronizar_widgets_navegador(browser)
-                hablar(f"Atención: la postulación a {empresa} no se completó ni confirmó el envío. Queda pausada y abierta para revisarla. Cuando la envíes, esperaré 35 segundos antes de cerrarla.")
+                GLOBAL_BOT_CONTROL["inv_status"] = ""
+                GLOBAL_BOT_CONTROL["oferta_actual"] = of
+                _registrar_historial_oferta(of)
 
-                confirmado_manual = False
-                while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"] and not GLOBAL_BOT_CONTROL["next_offer"]:
-                    if await _tabs_tienen_confirmacion(tabs_oferta):
-                        confirmado_manual = True
-                        GLOBAL_BOT_CONTROL["paused"] = False
+                print(f"\n>>> [{i}/{total}] Procesando oferta #{of_id}: {empresa} - {titulo} ({portal})")
+                page_reusada = None
+                emp_toks = [t for t in re.findall(r'[a-z0-9]{4,}', empresa.lower()) if t not in {"chile", "empresa", "grupo", "servicios", "mercado", "mayorista"}]
+                tit_toks = [t for t in re.findall(r'[a-z0-9]{4,}', titulo.lower()) if t not in {"practica", "ingenieria", "informatica", "chile", "program"}]
+                for pg_cand in list(ctx.pages):
+                    if pg_cand.is_closed():
+                        continue
+                    cu = (pg_cand.url or "").lower()
+                    emp_ok = (not emp_toks) or any(et in cu for et in emp_toks) or (len(emp_toks) >= 2 and "".join(emp_toks[-2:]) in cu)
+                    es_workday_app = "myworkdayjobs.com" in cu and "/apply" in cu and emp_ok and any(tk in cu for tk in tit_toks[:3])
+                    es_csod_app = "csod.com" in cu and "/application" in cu and emp_ok
+                    es_pandape_app = "pandape" in cu and ("/apply" in cu or "/detail/" in cu) and (emp_ok or "".join(re.findall(r'[a-z0-9]+', empresa.lower())[-2:]) in cu)
+                    if es_workday_app or es_csod_app or es_pandape_app:
+                        page_reusada = pg_cand
                         break
-                    await sincronizar_widgets_navegador(browser)
-                    await asyncio.sleep(0.5)
+                if page_reusada is not None:
+                    page = page_reusada
+                    BOT_OWNED_PAGES.add(page)
+                    await page.bring_to_front()
+                    await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas={page})
+                else:
+                    await gestionar_limite_pestanas(browser, max(0, GLOBAL_BOT_CONTROL["max_tabs"] - 1))
+                    page = await ctx.new_page()
+                    BOT_OWNED_PAGES.add(page)
+                tabs_oferta = [page]
 
-                if GLOBAL_BOT_CONTROL["stop"]:
+                try:
+                    res_tipo, msg = await procesar_oferta_interactiva(page, of, segundos_revision=segundos_revision, tabs_oferta=tabs_oferta)
+                except Exception as e:
+                    res_tipo, msg = "error", f"Error en oferta: {str(e)[:60]}"
+                try:
+                    if tabs_oferta and not tabs_oferta[-1].is_closed():
+                        _registrar_historial_oferta(of, tabs_oferta[-1].url)
+                except Exception:
+                    pass
+
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+
+                if res_tipo == "stop":
+                    print("\n🛑 Bucle detenido por completo por el usuario.")
+                    hablar("Bot detenido por completo a solicitud del usuario.", final=True)
+                    c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Detenido por usuario] {msg}", of_id))
+                    conn.commit()
                     conn.close()
                     await desactivar_widgets_navegador(browser)
                     return
 
-                # Si el usuario pulsó Reanudar justo tras pulsar Enviar, esperar brevemente confirmación AJAX antes de cerrar
-                if not confirmado_manual:
-                    for _ in range(7):
-                        if await _tabs_tienen_confirmacion(tabs_oferta):
-                            confirmado_manual = True
-                            break
-                        await asyncio.sleep(0.5)
-
-                if confirmado_manual:
+                if res_tipo in ["ok", "ya_postulado"]:
+                    nuevo_estado = "🟢 Postulado Confirmado"
+                    exitosas += 1
                     c.execute(
                         "UPDATE postulaciones SET estado = ?, fecha_postulacion = ?, metodo_postulacion = 'brave_cdp_pantalla', notas = ? WHERE id = ?",
-                        ("🟢 Postulado Confirmado", now_str, "[Completado manualmente tras pausa]", of_id)
+                        (nuevo_estado, now_str, f"[CV Maestro Duoc] {msg}", of_id)
                     )
                     conn.commit()
-                    exitosas += 1
-                    espera_post = max(35, int(GLOBAL_BOT_CONTROL.get("segundos", segundos_revision)))
+                    espera_post = max(35, int(GLOBAL_BOT_CONTROL.get("segundos", segundos_revision))) if res_tipo == "ok" else 4
                     if not await _esperar_post_envio_y_cerrar(browser, tabs_oferta, empresa, espera_post):
                         conn.close()
                         return
+                elif res_tipo == "descartada_desc":
+                    nuevo_estado = "⏭️ Descartada (Descripción no compatible)"
+                    c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", (nuevo_estado, msg, of_id))
+                    conn.commit()
+                    for pg_o in tabs_oferta:
+                        try:
+                            await pg_o.close()
+                        except Exception:
+                            pass
+                elif res_tipo == "cerrada":
+                    nuevo_estado = "🔴 Oferta Cerrada / Expirada"
+                    cerradas += 1
+                    c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", (nuevo_estado, msg, of_id))
+                    conn.commit()
+                    hablar(f"La oferta de {empresa} está cerrada. Pasando a la siguiente.")
+                    for pg_o in tabs_oferta:
+                        try:
+                            await pg_o.close()
+                        except Exception:
+                            pass
+                elif res_tipo in ["requiere_login", "captcha_antibot"]:
+                    nuevo_estado = "🔑 Requiere Login Manual" if res_tipo == "requiere_login" else "🛡️ Captcha / Verificación Manual"
+                    c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", (nuevo_estado, msg, of_id))
+                    conn.commit()
+                    hablar(f"El portal de {empresa} exige inicio de sesión o verificación humana; guardado en el panel para acceso manual.")
+                    for pg_o in tabs_oferta:
+                        try:
+                            await pg_o.close()
+                        except Exception:
+                            pass
+                elif res_tipo == "siguiente":
+                    GLOBAL_BOT_CONTROL["next_offer"] = False
+                    for pg_o in tabs_oferta:
+                        TABS_PROTEGIDAS_MANUAL.add(pg_o)
+                    c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Siguiente manual] {msg}", of_id))
+                    conn.commit()
+                    hablar(f"Pasando a la siguiente oferta tras {empresa}.")
                 else:
-                    print(f"🔒 Pestaña de #{of_id} sin confirmación de envío: se mantiene abierta y protegida (no se cierra automáticamente).")
+                    c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", (f"[Revisión en pantalla] {msg}", of_id))
+                    conn.commit()
+                    for pg_o in tabs_oferta:
+                        TABS_PROTEGIDAS_MANUAL.add(pg_o)
+                    print(f"⚠️  Oferta #{of_id} NO completó o no confirmó envío automático. PAUSANDO Y MANTENIENDO PESTAÑA ABIERTA.")
+                    GLOBAL_BOT_CONTROL["paused"] = True
+                    GLOBAL_BOT_CONTROL["timer_text"] = "SIN ENVIAR"
+                    traer_brave_al_frente()
+                    await sincronizar_widgets_navegador(browser)
+                    hablar(f"Atención: la postulación a {empresa} no se completó ni confirmó el envío. Queda pausada y abierta para revisarla. Cuando la envíes, esperaré 35 segundos antes de cerrarla.")
 
-            conn.close()
-            await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas=set(tabs_oferta) if res_tipo not in ["ok", "ya_postulado", "cerrada", "descartada_desc", "requiere_login", "captcha_antibot"] else None)
-            await asyncio.sleep(2.0)
+                    confirmado_manual = False
+                    cerrada_detectada = False
+                    chk_iter = 0
+                    while GLOBAL_BOT_CONTROL["paused"] and not GLOBAL_BOT_CONTROL["stop"] and not GLOBAL_BOT_CONTROL["next_offer"]:
+                        if await _tabs_tienen_confirmacion(tabs_oferta):
+                            confirmado_manual = True
+                            GLOBAL_BOT_CONTROL["paused"] = False
+                            break
+                        if chk_iter % 4 == 0 and await _tabs_tienen_cerrada(tabs_oferta):
+                            cerrada_detectada = True
+                            GLOBAL_BOT_CONTROL["paused"] = False
+                            break
+                        chk_iter += 1
+                        await sincronizar_widgets_navegador(browser)
+                        await asyncio.sleep(0.5)
 
-    await desactivar_widgets_navegador(browser)
+                    if GLOBAL_BOT_CONTROL["stop"]:
+                        conn.close()
+                        return
+
+                    if cerrada_detectada:
+                        cerradas += 1
+                        c.execute("UPDATE postulaciones SET estado = ?, notas = ? WHERE id = ?", ("🔴 Oferta Cerrada / Expirada", "Oferta cerrada o página inexistente detectada en pantalla", of_id))
+                        conn.commit()
+                        hablar(f"La oferta de {empresa} ya no existe o está cerrada. Pasando a la siguiente.")
+                        for pg_o in tabs_oferta:
+                            TABS_PROTEGIDAS_MANUAL.discard(pg_o)
+                            try:
+                                if not pg_o.is_closed():
+                                    await pg_o.close()
+                            except Exception:
+                                pass
+                    elif GLOBAL_BOT_CONTROL["next_offer"]:
+                        GLOBAL_BOT_CONTROL["next_offer"] = False
+                        GLOBAL_BOT_CONTROL["paused"] = False
+                        GLOBAL_BOT_CONTROL["timer_text"] = "SIGUIENTE"
+                        c.execute("UPDATE postulaciones SET notas = ? WHERE id = ?", ("[Siguiente manual] Avanzado sin esperar envío", of_id))
+                        conn.commit()
+                        print(f"\n⏭️  Continuando inmediatamente hacia la siguiente oferta tras #{of_id}...")
+                        hablar("Pasando a la siguiente oferta.")
+                    else:
+                        # Si el usuario pulsó Reanudar justo tras pulsar Enviar, esperar brevemente confirmación AJAX antes de cerrar
+                        if not confirmado_manual:
+                            for _ in range(7):
+                                if GLOBAL_BOT_CONTROL["stop"] or GLOBAL_BOT_CONTROL["next_offer"]:
+                                    break
+                                if await _tabs_tienen_confirmacion(tabs_oferta):
+                                    confirmado_manual = True
+                                    break
+                                await asyncio.sleep(0.5)
+
+                        if confirmado_manual:
+                            c.execute(
+                                "UPDATE postulaciones SET estado = ?, fecha_postulacion = ?, metodo_postulacion = 'brave_cdp_pantalla', notas = ? WHERE id = ?",
+                                ("🟢 Postulado Confirmado", now_str, "[Completado manualmente tras pausa]", of_id)
+                            )
+                            conn.commit()
+                            exitosas += 1
+                            espera_post = max(35, int(GLOBAL_BOT_CONTROL.get("segundos", segundos_revision)))
+                            if not await _esperar_post_envio_y_cerrar(browser, tabs_oferta, empresa, espera_post):
+                                conn.close()
+                                return
+                        else:
+                            print(f"🔒 Pestaña de #{of_id} sin confirmación de envío: se mantiene abierta y protegida (no se cierra automáticamente).")
+
+                conn.close()
+                await gestionar_limite_pestanas(browser, GLOBAL_BOT_CONTROL["max_tabs"], tabs_protegidas=set(tabs_oferta) if res_tipo not in ["ok", "ya_postulado", "cerrada", "descartada_desc", "requiere_login", "captcha_antibot"] else None)
+                await asyncio.sleep(2.0)
+
+        finally:
+            await desactivar_widgets_navegador(browser)
+
     print("\n==========================================================")
     print(f"🎯 Bucle finalizado: {exitosas} confirmadas | {cerradas} cerradas de {total} procesadas.")
     print("==========================================================")
