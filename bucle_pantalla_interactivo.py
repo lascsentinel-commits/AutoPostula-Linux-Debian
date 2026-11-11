@@ -341,7 +341,7 @@ FRASES_CONFIRMACION_ENVIO = [
     "tu postulación fue recibida", "postulación recibida", "solicitud recibida",
     "enviada correctamente", "gracias por postular", "gracias por su solicitud",
     "gracias por tu solicitud", "hemos recibido su solicitud", "gracias por aplicar",
-    "has postulado con éxito", "ya te has postulado", "ya has postulado",
+    "te postulaste correctamente", "has postulado con éxito", "ya te has postulado", "ya has postulado",
     "ya estás postulado", "ya postulaste", "postular de nuevo",
     "usted ya ha presentado solicitud", "ya ha presentado solicitud",
     "ya estás participando en el proceso", "ya ha sido utilizado para postularte",
@@ -362,6 +362,7 @@ GLOBAL_BOT_CONTROL = {
     "last_cmd_ts": 0,
     "panel_open": False,
     "leer_descripcion": False,
+    "leer_qa": True,
     "max_tabs": 4,
     "read_desc_now": False,
     "clean_tabs_now": False,
@@ -460,7 +461,7 @@ _WIDGET_JS = """
         }
         return;
     }
-    const WIDGET_VER = '4.4';
+    const WIDGET_VER = '4.5';
     window.__autopostula_widget_version = WIDGET_VER;
     if (window.__autopostula_interval && window.__autopostula_interval_ver !== WIDGET_VER) {
         clearInterval(window.__autopostula_interval);
@@ -473,6 +474,7 @@ _WIDGET_JS = """
     window.__autopostula_segundos_revision = window.__autopostula_segundos_revision || 30;
     window.__autopostula_panel_open = window.__autopostula_panel_open !== undefined ? window.__autopostula_panel_open : false;
     window.__autopostula_leer_desc = window.__autopostula_leer_desc !== undefined ? window.__autopostula_leer_desc : false;
+    window.__autopostula_leer_qa = window.__autopostula_leer_qa !== undefined ? window.__autopostula_leer_qa : true;
     window.__autopostula_max_tabs = window.__autopostula_max_tabs || 4;
     window.__autopostula_inv_open = window.__autopostula_inv_open || false;
     window.__autopostula_inv_status = window.__autopostula_inv_status || "";
@@ -500,6 +502,7 @@ _WIDGET_JS = """
         const modalToggleBtn = document.getElementById('autopostula-modal-toggle');
         const modalTimer = document.getElementById('autopostula-modal-timer');
         const autoDescBtn = document.getElementById('autopostula-modal-autodesc');
+        const readQaBtn = document.getElementById('autopostula-modal-readqa');
         const maxTabsVal = document.getElementById('autopostula-max-tabs-val');
         const invBox = document.getElementById('autopostula-inv-box');
         const invStat = document.getElementById('autopostula-inv-status');
@@ -512,6 +515,12 @@ _WIDGET_JS = """
             autoDescBtn.innerText = on ? '🔊 Lectura Auto Descripción (Edge-TTS): ON' : '🔇 Lectura Auto Descripción (Edge-TTS): OFF';
             autoDescBtn.style.background = on ? '#0ea5e9' : 'rgba(255,255,255,0.10)';
             autoDescBtn.style.borderColor = on ? '#38bdf8' : 'rgba(255,255,255,0.22)';
+        }
+        if (readQaBtn) {
+            const qaOn = window.__autopostula_leer_qa !== false;
+            readQaBtn.innerText = qaOn ? '🔊 Leer Preguntas y Respuestas: ON' : '🔇 Leer Preguntas y Respuestas: OFF';
+            readQaBtn.style.background = qaOn ? '#0f766e' : 'rgba(255,255,255,0.10)';
+            readQaBtn.style.borderColor = qaOn ? '#2dd4bf' : 'rgba(255,255,255,0.22)';
         }
 
         if (window.__autopostula_stop) {
@@ -644,8 +653,8 @@ _WIDGET_JS = """
                     🔇 Lectura Auto Descripción (Edge-TTS): OFF
                 </button>
 
-                <button id="autopostula-modal-readdesc" style="background:#0f766e; border:none; border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:8px; cursor:pointer;">
-                    📖 Leer Descripción Ahora (Edge-TTS)
+                <button id="autopostula-modal-readqa" style="background:#0f766e; border:1px solid #2dd4bf; border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:8px; cursor:pointer;">
+                    🔊 Leer Preguntas y Respuestas: ON
                 </button>
 
                 <button id="autopostula-modal-skip" style="background:#10b981; border:none; border-radius:10px; color:#ffffff; font-size:13px; font-weight:800; padding:8px; cursor:pointer;">
@@ -780,9 +789,11 @@ _WIDGET_JS = """
                 updateWidgetState();
             });
 
-            modal.querySelector('#autopostula-modal-readdesc')?.addEventListener('click', (e) => {
+            modal.querySelector('#autopostula-modal-readqa')?.addEventListener('click', (e) => {
                 e.stopPropagation();
-                pushCmd('read_desc_now', true);
+                window.__autopostula_leer_qa = !(window.__autopostula_leer_qa !== false);
+                pushCmd('toggle_readqa', window.__autopostula_leer_qa);
+                updateWidgetState();
             });
 
             modal.querySelector('#autopostula-modal-skip')?.addEventListener('click', (e) => {
@@ -900,6 +911,9 @@ _WIDGET_JS = """
         window.__autopostula_timer_text = st.timer_text || '30s';
         window.__autopostula_segundos_revision = st.segundos || 30;
         window.__autopostula_leer_desc = !!st.leer_descripcion;
+        if (typeof st.leer_qa === 'boolean') {
+            window.__autopostula_leer_qa = st.leer_qa;
+        }
         window.__autopostula_max_tabs = st.max_tabs || 4;
         if (typeof st.inv_status === 'string' && st.inv_status) {
             window.__autopostula_inv_status = st.inv_status;
@@ -1038,6 +1052,10 @@ def _aplicar_comando_control(act: str, val=None):
         hablar(f"Lectura automática de descripciones {estado_txt}.")
     elif act == "read_desc_now":
         GLOBAL_BOT_CONTROL["read_desc_now"] = True
+    elif act == "toggle_readqa":
+        GLOBAL_BOT_CONTROL["leer_qa"] = bool(val)
+        estado_qa = "activada" if GLOBAL_BOT_CONTROL["leer_qa"] else "desactivada"
+        hablar(f"Lectura de preguntas y respuestas {estado_qa}.")
     elif act == "set_max_tabs" and val:
         GLOBAL_BOT_CONTROL["max_tabs"] = max(1, min(15, int(val)))
         GLOBAL_BOT_CONTROL["clean_tabs_now"] = True
@@ -1088,9 +1106,9 @@ async def sincronizar_widgets_navegador(browser):
                 return {
                     ready: (
                         typeof window.__autopostula_sync_state === 'function' &&
-                        window.__autopostula_widget_version === '4.4' &&
+                        window.__autopostula_widget_version === '4.5' &&
                         document.querySelectorAll('#autopostula-root-container').length === 1 &&
-                        !!document.getElementById('autopostula-modal-investigar')
+                        !!document.getElementById('autopostula-modal-readqa')
                     ),
                     cmd
                 };
@@ -1189,6 +1207,7 @@ async def sincronizar_widgets_navegador(browser):
         "segundos": GLOBAL_BOT_CONTROL["segundos"],
         "panel_open": GLOBAL_BOT_CONTROL["panel_open"],
         "leer_descripcion": GLOBAL_BOT_CONTROL["leer_descripcion"],
+        "leer_qa": GLOBAL_BOT_CONTROL["leer_qa"],
         "max_tabs": GLOBAL_BOT_CONTROL["max_tabs"],
         "inv_status": GLOBAL_BOT_CONTROL["inv_status"],
     }
@@ -2207,6 +2226,8 @@ async def autocompletar_datos_personales_y_cv(page) -> int:
 
 async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[dict]:
     """Detecta, resuelve con Gemini/Memoria y rellena todas las preguntas visibles en la pantalla o paso actual."""
+    if "/candidate/postapply" in (page.url or "").lower():
+        return []
     loc_tas = []
     # Si hay un dialog abierto (LinkedIn Easy Apply SDUI), priorizar estrictamente los campos dentro de él
     tiene_dialog = False
@@ -2458,7 +2479,9 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
             print(f"Aviso al llenar campo {idx}: {e}")
 
     # Marcar TODOS los grupos de radios y selects con coincidencia semántica de perfil y sí/no
-    await page.evaluate(r'''() => {
+    qa_radios_selects = await page.evaluate(r'''() => {
+        const answered = [];
+        const cleanLine = (s) => (s || '').replace(/\s+/g, ' ').trim().split(/\r?\n/)[0].slice(0, 140);
         const radioNames = new Set();
         document.querySelectorAll('input[type="radio"]').forEach(r => {
             if (r.name) radioNames.add(r.name);
@@ -2535,6 +2558,8 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
                 chosen.inp.click();
                 chosen.inp.dispatchEvent(new Event('change', { bubbles: true }));
                 chosen.inp.dispatchEvent(new Event('input', { bubbles: true }));
+                const pq = cleanLine(container ? container.innerText : qtxt);
+                if (pq && chosen.txt) answered.push({ pregunta: pq, respuesta: chosen.txt });
             }
         }
 
@@ -2613,9 +2638,20 @@ async def rellenar_formulario_actual(page, empresa: str, titulo: str) -> list[di
                 sel.value = targetOption.value;
                 sel.dispatchEvent(new Event('change', { bubbles: true }));
                 sel.dispatchEvent(new Event('input', { bubbles: true }));
+                const sq = cleanLine(container ? container.innerText : txt);
+                const sa = (targetOption.innerText || targetOption.textContent || '').trim();
+                if (sq && sa) answered.push({ pregunta: sq, respuesta: sa });
             }
         }
+        return answered;
     }''')
+
+    for qa_rs in (qa_radios_selects or []):
+        qp = (qa_rs.get("pregunta") or "").strip()
+        qr = (qa_rs.get("respuesta") or "").strip()
+        if qp and qr and qp not in seen:
+            seen.add(qp)
+            qa_list.append({"num": f"Pregunta {len(qa_list) + 1}", "pregunta": qp, "respuesta": qr})
 
     return qa_list
 
@@ -3140,6 +3176,7 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
 
         # PASO 1: Pulsar el primer botón 'Postula fácil' / 'Postularme' / 'Solicitud sencilla' / 'Solicitar'
     print("Paso 1: Buscando y pulsando botón inicial (Postula fácil / Solicitud sencilla)...")
+    clic_inicial = False
     if not ya_en_formulario_ats:
         tabs_antes = list(page.context.pages)
         clic_inicial = await pulsar_primer_postula(page)
@@ -3187,6 +3224,8 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if es_pagina_comercial_no_laboral(page.url, body_tras_clic):
         print(f"⚠️  Se detectó redirección comercial o no laboral ({page.url[:70]}). Cerrando sin postular.")
         return "cerrada", "Redirigió a página comercial / publicidad (no es oferta laboral)"
+    if clic_inicial and ("/candidate/postapply" in page.url.lower() or "te postulaste correctamente" in body_tras_clic):
+        return "ok", f"Postulación 1-clic confirmada en {portal} (sin preguntas previas)"
     if any(w in body_tras_clic for w in FRASES_YA_POSTULADO):
         return "ya_postulado", "Ya estabas postulado previamente a esta oferta (detectado tras clic inicial)"
 
@@ -3295,10 +3334,12 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
     if st == "next":
         return "siguiente", "Avanzado manualmente hacia la siguiente oferta"
 
-    # PASO 4: LEER EN VOZ ALTA CADA PREGUNTA Y SU RESPUESTA CON DI
+    # PASO 4: LEER EN VOZ ALTA CADA PREGUNTA Y SU RESPUESTA CON DI (según interruptor Leer Preguntas y Respuestas ON/OFF)
     traer_brave_al_frente()
     if qa_list:
-        hablar(f"El reclutador de {empresa} solicita responder {len(qa_list)} preguntas.")
+        leer_qa_on = GLOBAL_BOT_CONTROL.get("leer_qa", True)
+        if leer_qa_on:
+            hablar(f"El reclutador de {empresa} solicita responder {len(qa_list)} preguntas.")
         for item in qa_list:
             # Comprobar si el usuario pausó o detuvo entre lecturas
             st = await comprobar_pausa_y_parada(page)
@@ -3313,9 +3354,12 @@ async def procesar_oferta_interactiva(page, oferta: dict, segundos_revision: int
             r_resumen = r_full.split('.')[0] if '.' in r_full else r_full[:80]
             print(f"📢 {item['num']}: {q_clean}")
             print(f"   ↳ {r_resumen}\n")
-            hablar(f"{item['num']}: {q_clean}.")
-            hablar(f"Respuesta: {r_resumen}.")
-    else:
+            if GLOBAL_BOT_CONTROL.get("leer_qa", True):
+                hablar(f"{item['num']}: {q_clean}.")
+                hablar(f"Respuesta: {r_resumen}.")
+        segundos_revision = max(30, int(GLOBAL_BOT_CONTROL.get("segundos", segundos_revision)))
+        GLOBAL_BOT_CONTROL["segundos"] = segundos_revision
+    elif GLOBAL_BOT_CONTROL.get("leer_qa", True):
         hablar(f"Formulario sin preguntas adicionales para {empresa}.")
 
     # PASO 5: RECIÉN AQUÍ COMIENZAN LOS 30 SEGUNDOS DE PAUSA DE REVISIÓN
