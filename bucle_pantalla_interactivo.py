@@ -285,6 +285,8 @@ def es_url_catalogo(url: str, portal: str = "") -> bool:
     if not url:
         return False
     u = url.split("?")[0].rstrip("/").lower()
+    if any(k in u for k in ("/ingresar", "/login", "/signin", "/sign-in", "/usuarios/", "/auth", "/registro", "/register", "/apply", "/postular")):
+        return False
     
     # Rutas típicas de catálogo/búsqueda general
     if u.endswith(("/ofertas", "/trabajos", "/empleos", "/buscar", "/search", "/portal", "/postulaciones", "/concursos")):
