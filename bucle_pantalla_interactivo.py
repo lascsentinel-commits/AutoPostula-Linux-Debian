@@ -332,7 +332,9 @@ FRASES_CERRADA = [
     "anuncio ha expirado", "ha sido desactivado por el empleador", "la publicación ha finalizado",
     "esta oferta ha expirado", "esta búsqueda ha finalizado", "convocatoria ha finalizado",
     "oferta pausada", "no se encuentra disponible", "lo sentimos! esta oferta",
-    "lo sentimos, esta oferta", "esta oferta ya no", "no disponible actualmente"
+    "lo sentimos, esta oferta", "esta oferta ya no", "no disponible actualmente",
+    "no podemos encontrar esta página", "esta página no existe",
+    "página no encontrada", "page not found"
 ]
 
 FRASES_YA_POSTULADO = [
