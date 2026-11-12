@@ -8,10 +8,12 @@ como cualquier pega / empleo formal TI en Chile.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -92,68 +94,67 @@ def _disparar_investigacion(data: dict) -> dict:
     with open(ultimo_path, "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
 
-    agy_bin = "/home/dhamit/.local/bin/agy" if os.path.exists("/home/dhamit/.local/bin/agy") else "agy"
+    agy_bin = "/home/dhamit/.local/bin/agy" if os.path.exists("/home/dhamit/.local/bin/agy") else (shutil.which("agy") or "agy")
     log_path = os.path.join(INVESTIGACIONES_DIR, f"{req_safe}.log")
     res_path = os.path.join(INVESTIGACIONES_DIR, "ultimo_resultado.json")
+    parent_ws = os.path.dirname(BASE_DIR)
+    backup_script = os.path.join(parent_ws, ".agents", "scripts", "backup_helper.py")
+    di_cmd = _resolve_di_cmd()
+    di_hint = f"{' '.join(di_cmd)} --final" if di_cmd else "síntesis de voz"
     prompt = (
         f"Eres el Agente Investigador de AutoPostula llamado desde el botón flotante de Brave.\n"
         f"Lee primero el archivo de contexto completo en: {report_path}\n"
         f"Nota del usuario: {note or '(sin nota adicional, revisar por qué no se completó ni envió la postulación)'}\n"
         f"URL activa reportada: {url}\n"
         f"1) Conecta por CDP a Brave en http://127.0.0.1:9222 para inspeccionar el DOM real, errores, formularios, modales o botones bloqueados de esa pestaña.\n"
-        f"2) Identifica exactamente por qué no se ha postulado o qué campo/botón faltó, complétalo o corrige bucle_pantalla_interactivo.py (respaldando primero con /home/dhamit/Documentos/MYCreIAtedAPPs/.agents/scripts/backup_helper.py y validando con py_compile).\n"
+        f"2) Identifica exactamente por qué no se ha postulado o qué campo/botón faltó, complétalo o corrige bucle_pantalla_interactivo.py (respaldando primero con {backup_script} y validando con py_compile).\n"
         f"3) Guarda el resumen JSON en {res_path} con claves req_id='{req_safe}', status='completado', summary, timestamp.\n"
-        f"4) Anuncia el hallazgo y resultado en voz alta ejecutando /home/dhamit/.local/bin/Di --final."
+        f"4) Anuncia el hallazgo y resultado en voz alta ejecutando {di_hint}."
     )
     try:
         with open(log_path, "w", encoding="utf-8") as log_f:
             subprocess.Popen(
-                [agy_bin, "--dangerously-skip-permissions", "--mode", "accept-edits", "--add-dir", "/home/dhamit/Documentos/MYCreIAtedAPPs", "-p", prompt],
+                [agy_bin, "--dangerously-skip-permissions", "--mode", "accept-edits", "--add-dir", parent_ws, "-p", prompt],
                 stdin=subprocess.DEVNULL,
                 stdout=log_f,
                 stderr=subprocess.STDOUT,
                 cwd=BASE_DIR,
-                start_new_session=True,
+                start_new_session=(sys.platform != "win32"),
             )
         launched = True
     except Exception as e:
         launched = False
         report["launch_error"] = str(e)
-    try:
-        di_bin = "/home/dhamit/.local/bin/Di"
-        if launched and os.path.exists(di_bin):
-            def _hablar_inv(msg_inv: str):
-                try:
-                    p_di = subprocess.Popen([di_bin], stdin=subprocess.PIPE, text=True)
-                    p_di.communicate(input=msg_inv, timeout=10)
-                except Exception:
-                    pass
-            threading.Thread(
-                target=_hablar_inv,
-                args=(f"Agente investigador activado para {report['empresa'] or 'esta oferta'}. Ya recibí tu nota y estoy analizando la pestaña.",),
-                daemon=True,
-            ).start()
-    except Exception:
-        pass
+    if launched:
+        hablar_no_bloqueante(f"Agente investigador activado para {report['empresa'] or 'esta oferta'}. Ya recibí tu nota y estoy analizando la pestaña.")
     return {"ok": True, "launched": launched, "report": report}
 
 
-def is_daemon_running():
+def _find_python_script_pids(pattern: str) -> list[int]:
+    """Busca PIDs de un script Python de forma compatible con Linux y Windows 11."""
     try:
-        out = subprocess.check_output(["pgrep", "-f", "AutoPostula/daemon_scheduler.py"]).decode().strip()
-        pids = [int(p) for p in out.splitlines() if p.strip()]
-        return (len(pids) > 0), (pids[0] if pids else None)
+        if sys.platform == "win32":
+            ps = (
+                f"Get-CimInstance Win32_Process | "
+                f"Where-Object {{ $_.CommandLine -like '*{pattern}*' -and $_.ProcessId -ne {os.getpid()} }} | "
+                f"Select-Object -ExpandProperty ProcessId"
+            )
+            out = subprocess.check_output(["powershell", "-NoProfile", "-Command", ps], text=True, stderr=subprocess.DEVNULL).strip()
+        else:
+            out = subprocess.check_output(["pgrep", "-f", pattern], text=True, stderr=subprocess.DEVNULL).strip()
+        return [int(p) for p in out.splitlines() if p.strip().isdigit() and int(p) != os.getpid()]
     except Exception:
-        return False, None
+        return []
+
+
+def is_daemon_running():
+    pids = _find_python_script_pids("daemon_scheduler.py")
+    return (len(pids) > 0), (pids[0] if pids else None)
 
 
 def is_bot_running():
-    try:
-        out = subprocess.check_output(["pgrep", "-f", "bucle_pantalla_interactivo.py"]).decode().strip()
-        pids = [int(p) for p in out.splitlines() if p.strip()]
-        return (len(pids) > 0), (pids[0] if pids else None)
-    except Exception:
-        return False, None
+    pids = _find_python_script_pids("bucle_pantalla_interactivo.py")
+    return (len(pids) > 0), (pids[0] if pids else None)
 
 
 def contar_pendientes_validas():
@@ -164,19 +165,64 @@ def contar_pendientes_validas():
         return 0
 
 
+def _resolve_di_cmd() -> list[str] | None:
+    if sys.platform == "win32":
+        di_cmd = os.path.join(BASE_DIR, "bin", "Di.cmd")
+        if os.path.exists(di_cmd):
+            return [di_cmd]
+    for cand in ("/home/dhamit/.local/bin/Di", os.path.join(BASE_DIR, "bin", "Di")):
+        if os.path.exists(cand):
+            return [cand]
+    di_py = os.path.join(BASE_DIR, "bin", "di.py")
+    if os.path.exists(di_py):
+        return [PYTHON_BIN, di_py]
+    found = shutil.which("Di")
+    return [found] if found else None
+
+
 def hablar_no_bloqueante(msg: str):
     try:
-        di_bin = "/home/dhamit/.local/bin/Di"
-        if os.path.exists(di_bin):
+        cmd = _resolve_di_cmd()
+        if cmd:
             def _run(txt: str):
                 try:
-                    p_di = subprocess.Popen([di_bin], stdin=subprocess.PIPE, text=True)
+                    p_di = subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
                     p_di.communicate(input=txt, timeout=10)
                 except Exception:
                     pass
             threading.Thread(target=_run, args=(msg,), daemon=True).start()
+        elif sys.platform == "win32":
+            clean = msg.replace('"', "").replace("'", "")
+            ps_cmd = f'Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak("{clean}")'
+            subprocess.Popen(["powershell", "-NoProfile", "-Command", ps_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+
+def _launch_bot_process(extra_args: list[str]):
+    env = os.environ.copy()
+    sh_path = os.path.join(BASE_DIR, "bot_pantalla.sh")
+    if sys.platform != "win32":
+        env.setdefault("DISPLAY", ":0")
+        if os.path.exists(os.path.expanduser("~/.Xauthority")):
+            env.setdefault("XAUTHORITY", os.path.expanduser("~/.Xauthority"))
+        if os.path.exists(sh_path):
+            cmd = [sh_path] + extra_args
+        else:
+            cmd = [PYTHON_BIN, os.path.join(BASE_DIR, "bucle_pantalla_interactivo.py")] + extra_args
+        subprocess.Popen(cmd, env=env, cwd=BASE_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    else:
+        cmd = [PYTHON_BIN, os.path.join(BASE_DIR, "bucle_pantalla_interactivo.py")] + extra_args
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(cmd, env=env, cwd=BASE_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
+
+
+def _stop_bot_processes():
+    if sys.platform == "win32":
+        for pid in _find_python_script_pids("bucle_pantalla_interactivo.py"):
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.run(["pkill", "-SIGTERM", "-f", "bucle_pantalla_interactivo.py"], check=False)
 
 
 def get_stats():
@@ -193,8 +239,20 @@ def get_stats():
     cur.execute("SELECT COUNT(*) FROM postulaciones;")
     total = cur.fetchone()[0] or 0
 
-    cur.execute("SELECT COUNT(*) FROM postulaciones WHERE estado LIKE '%Postulado%' OR estado LIKE '%Confirmado%' OR estado LIKE '%entrevista%' OR estado LIKE '%Oferta%';")
+    cur.execute("""
+        SELECT COUNT(*) FROM postulaciones
+        WHERE estado LIKE '%Postulado Confirmado%'
+           OR estado LIKE '%Abierta en Brave%'
+           OR estado LIKE '%entrevista%'
+           OR estado LIKE '%Oferta recibida%';
+    """)
     enviadas_abiertas = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT COUNT(*) FROM postulaciones WHERE estado LIKE '%Cerrada%' OR estado LIKE '%Expirada%';")
+    cerradas_total = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT COUNT(*) FROM postulaciones WHERE estado LIKE '%Pausada%' OR estado LIKE '%Captcha%' OR estado LIKE '%Login%';")
+    pausadas_manual_total = cur.fetchone()[0] or 0
 
     cur.execute("SELECT COUNT(*) FROM postulaciones WHERE estado LIKE '%Cola%';")
     en_cola = cur.fetchone()[0] or 0
@@ -206,6 +264,8 @@ def get_stats():
     por_portal = {r["portal"]: r["cnt"] for r in cur.fetchall()}
     conn.close()
 
+    validas_disponibles = contar_pendientes_validas()
+
     return {
         "daemon_active": active,
         "daemon_pid": pid,
@@ -215,6 +275,9 @@ def get_stats():
         "horarios_config": sched.get("horarios") or "01:00, 04:00, 06:30, 08:00, 12:00, 14:00, 17:00, 22:00",
         "total_postulaciones": total,
         "postuladas_activas": enviadas_abiertas,
+        "cerradas_total": cerradas_total,
+        "pausadas_manual_total": pausadas_manual_total,
+        "validas_disponibles": validas_disponibles,
         "en_cola_1clic": en_cola,
         "con_email_directo": con_email,
         "alertas_pendientes": len(alertas),
@@ -227,6 +290,49 @@ def get_stats():
         "conteo_postulaciones_portal": por_portal,
         "bookmarklet": generar_bookmarklet_universal(perfil),
     }
+
+
+def get_ofertas_14_portales():
+    """Devuelve todas las ofertas de los 14 portales clasificadas en válidas disponibles, postuladas, pausadas/manual, cerradas y otras en cola."""
+    init_db()
+    perfil = obtener_perfil()
+    try:
+        from bucle_pantalla_interactivo import obtener_ofertas_validas_pendientes
+        validas_ids = {int(o["id"]) for o in obtener_ofertas_validas_pendientes(limite=500)}
+    except Exception:
+        validas_ids = set()
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM postulaciones ORDER BY id DESC;")
+    rows = cur.fetchall()
+    conn.close()
+
+    counts = {"validas": 0, "postuladas": 0, "pausadas": 0, "cerradas": 0, "cola_ia": 0, "total": len(rows)}
+    items = []
+    for r in rows:
+        item = dict(r)
+        est = item.get("estado") or ""
+        oid = int(item.get("id") or 0)
+        if oid in validas_ids:
+            cat = "validas"
+        elif "Cerrada" in est or "Expirada" in est or "No aceptado" in est or "Descartada" in est:
+            cat = "cerradas"
+        elif "Postulado Confirmado" in est or "entrevista" in est or "Oferta recibida" in est or "Abierta en Brave" in est:
+            cat = "postuladas"
+        elif "Pausada" in est or "Captcha" in est or "Login" in est:
+            cat = "pausadas"
+        elif "Cola" in est or "Lista" in est:
+            cat = "cola_ia"
+        else:
+            cat = "pausadas"
+        counts[cat] += 1
+        item["categoria"] = cat
+        item["es_valida_bot"] = oid in validas_ids
+        item["mailto_url"] = generar_mailto_postulacion(item, perfil) if item.get("email_reclutador") else ""
+        items.append(item)
+
+    return {"ok": True, "counts": counts, "items": items}
 
 
 def serialize_postulaciones(filtro_estado="Todos", filtro_portal="Todos", search_q="", limit=200):
@@ -759,6 +865,83 @@ HTML_PAGE = """<!DOCTYPE html>
             color: var(--text-secondary);
             white-space: pre-wrap;
         }
+        .v14-box-inline {
+            margin-top: 6px;
+            padding: 6px 8px;
+            border-radius: 8px;
+            background: rgba(56, 189, 248, 0.10);
+            border: 1px solid rgba(56, 189, 248, 0.28);
+            font-size: 0.74rem;
+            font-weight: 700;
+            color: #BAE6FD;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+        }
+        dialog#validas14Dialog {
+            width: min(1080px, 95vw);
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .v14-hero {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 16px;
+            align-items: center;
+            background: linear-gradient(135deg, rgba(14, 165, 233, 0.16), rgba(16, 185, 129, 0.10));
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            border-radius: 14px;
+            padding: 14px 18px;
+            margin-bottom: 12px;
+        }
+        .v14-big-num {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 3.1rem;
+            font-weight: 800;
+            line-height: 1;
+            color: #38BDF8;
+            min-width: 82px;
+            text-align: center;
+        }
+        .v14-tabs {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .v14-tab {
+            background: #090D16;
+            color: var(--text-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 999px;
+            padding: 6px 12px;
+            font-size: 0.78rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .v14-tab.active {
+            background: #0284C7;
+            color: #FFFFFF;
+            border-color: #38BDF8;
+        }
+        .v14-grid {
+            display: grid;
+            grid-template-columns: minmax(280px, 0.95fr) 1.35fr;
+            gap: 14px;
+            margin-top: 10px;
+        }
+        @media (max-width: 860px) {
+            .v14-grid { grid-template-columns: 1fr; }
+        }
+        .v14-detail-box {
+            background: #090D16;
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 14px;
+            max-height: 52vh;
+            overflow-y: auto;
+        }
 
         #toast {
             position: fixed;
@@ -789,6 +972,7 @@ HTML_PAGE = """<!DOCTYPE html>
         <div class="top-actions">
             <span id="bot-live-badge" style="padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700; background:rgba(148,163,184,0.16); color:#cbd5e1; border:1px solid rgba(148,163,184,0.3);">⚪ Bot Inactivo</span>
             <button id="btn-interactive-loop" class="btn-emerald" onclick="startInteractiveLoop()" style="background: linear-gradient(135deg, #0284c7, #2563eb); border: none; font-weight:800;" title="Ejecuta el bucle de postulación sobre pantalla con Brave, lectura por voz y widget flotante de 30s">🤖 Bucle en Pantalla (30s)</button>
+            <button type="button" id="btn-revisar-14" class="btn-sky" onclick="openValidas14Modal('validas')" style="background: linear-gradient(135deg, #0ea5e9, #6366f1); color:#fff; border:none; font-weight:800;" title="Despliega el total en grande y separa Válidas Disponibles, Postuladas, Pausadas y Cerradas en los 14 portales">🔍 Revisar Válidas (14 Portales)</button>
             <button class="btn-emerald" onclick="startHeadlessBatch()" style="background: linear-gradient(135deg, #059669, #10b981); border: none; font-weight:800;" title="Postula automáticamente a todas las ofertas válidas en segundo plano sin pausar">⚡ Postular Todas (Segundo Plano)</button>
             <button class="btn-danger" onclick="stopBotProcess()" style="background: #ef4444; color: white; border: none; font-weight:800; border-radius:8px; padding:6px 12px; cursor:pointer;" title="Detiene cualquier proceso activo del bot de pantalla">🛑 Detener Bot</button>
             <button class="btn-emerald" onclick="openNextBatch()">🚀 Abrir Lote 10 en Brave</button>
@@ -804,6 +988,10 @@ HTML_PAGE = """<!DOCTYPE html>
             <span class="kpi-label">Portales Reales Activos</span>
             <span class="kpi-val" id="kpi-portales">14</span>
             <span class="kpi-sub">API JSON + SSR + Playwright Brave</span>
+            <div class="v14-box-inline">
+                <span id="kpi-validas-text">Válidas bot: 0</span>
+                <button type="button" class="btn-sm btn-sky" onclick="openValidas14Modal('validas')" style="padding:3px 8px; font-size:0.72rem;">🔍 Ver 14</button>
+            </div>
         </div>
         <div class="kpi-card">
             <span class="kpi-label">Total Ofertas Procesadas IA</span>
@@ -811,14 +999,14 @@ HTML_PAGE = """<!DOCTYPE html>
             <span class="kpi-sub" id="kpi-email-sub">0 con correo directo reclutador</span>
         </div>
         <div class="kpi-card">
-            <span class="kpi-label">Abiertas / Confirmadas</span>
+            <span class="kpi-label">Postuladas Confirmadas</span>
             <span class="kpi-val" id="kpi-activas" style="color:#34D399">0</span>
-            <span class="kpi-sub">Listas o enviadas en navegador</span>
+            <span class="kpi-sub" id="kpi-activas-sub">Confirmadas en navegador · Cerradas: 0</span>
         </div>
         <div class="kpi-card">
             <span class="kpi-label">En Cola 1-Clic (Respuestas IA)</span>
             <span class="kpi-val" id="kpi-cola" style="color:#38BDF8">0</span>
-            <span class="kpi-sub">Usa «Abrir Lote 10» para despachar</span>
+            <span class="kpi-sub">Usa «Abrir Lote 10» o «Revisar Válidas»</span>
         </div>
         <div class="kpi-card">
             <span class="kpi-label">Piloto Automático 24/7</span>
@@ -889,9 +1077,13 @@ HTML_PAGE = """<!DOCTYPE html>
                 </select>
                 <select id="filter-estado" onchange="loadPostulaciones()" style="width:220px">
                     <option value="Todos">Todos los estados</option>
-                    <option value="🟡 Postulado (Abierta en Brave)">🟡 Abierta en Brave</option>
-                    <option value="🟡 Lista con IA (En Cola 1-Clic)">🟡 En Cola 1-Clic (Lista con IA)</option>
                     <option value="🟢 Postulado Confirmado">🟢 Postulado Confirmado</option>
+                    <option value="🟡 Lista con IA (En Cola 1-Clic)">🟡 En Cola 1-Clic (Lista con IA)</option>
+                    <option value="🟡 Pausada (Requiere Login / Revisión)">🟡 Pausada (Login / Revisión)</option>
+                    <option value="🛡️ Captcha / Verificación Manual">🛡️ Captcha / Verificación Manual</option>
+                    <option value="🔑 Requiere Login Manual">🔑 Requiere Login Manual</option>
+                    <option value="🔴 Oferta Cerrada / Expirada">🔴 Oferta Cerrada / Expirada</option>
+                    <option value="🟡 Postulado (Abierta en Brave)">🟡 Abierta en Brave</option>
                     <option value="🟣 En entrevista">🟣 En entrevista</option>
                     <option value="🟢 Oferta recibida">🟢 Oferta recibida</option>
                     <option value="🔴 No aceptado">🔴 No aceptado</option>
@@ -954,6 +1146,51 @@ HTML_PAGE = """<!DOCTYPE html>
     </form>
 </dialog>
 
+<!-- Modal Revisar Ofertas Válidas en los 14 Portales -->
+<dialog id="validas14Dialog" closedby="any" aria-labelledby="v14DialogTitle">
+    <form method="dialog">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:10px;">
+            <h2 id="v14DialogTitle" style="font-size:1.08rem;">🔍 Ofertas en los 14 Portales · Válidas, Postuladas y Cerradas</h2>
+            <button type="submit" class="btn-sm">✕ Cerrar</button>
+        </div>
+
+        <div class="v14-hero">
+            <div class="v14-big-num" id="v14-big-count">0</div>
+            <div>
+                <div id="v14-big-label" style="font-size:0.95rem; font-weight:800; color:#F8FAFC;">Ofertas en categoría seleccionada</div>
+                <div id="v14-summary-line" style="font-size:0.78rem; color:var(--text-secondary); margin-top:4px;">Cargando resumen de los 14 portales...</div>
+            </div>
+        </div>
+
+        <div class="v14-tabs">
+            <button type="button" class="v14-tab active" data-cat="validas" onclick="setValidas14Tab('validas')">✅ Válidas Disponibles (<span id="v14-c-validas">0</span>)</button>
+            <button type="button" class="v14-tab" data-cat="postuladas" onclick="setValidas14Tab('postuladas')">🟢 Postulados (<span id="v14-c-postuladas">0</span>)</button>
+            <button type="button" class="v14-tab" data-cat="pausadas" onclick="setValidas14Tab('pausadas')">🟡 Pausadas / CAPTCHA (<span id="v14-c-pausadas">0</span>)</button>
+            <button type="button" class="v14-tab" data-cat="cerradas" onclick="setValidas14Tab('cerradas')">🔴 Ofertas Cerradas (<span id="v14-c-cerradas">0</span>)</button>
+            <button type="button" class="v14-tab" data-cat="cola_ia" onclick="setValidas14Tab('cola_ia')">📦 Otras en Cola IA (<span id="v14-c-cola_ia">0</span>)</button>
+        </div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <input type="search" id="v14-search" placeholder="Filtrar por cargo, empresa, notas..." oninput="renderValidas14List()" style="flex:1; min-width:200px;">
+            <select id="v14-portal" onchange="renderValidas14List()" style="width:210px;">
+                <option value="Todos">Todos los portales (14)</option>
+            </select>
+        </div>
+
+        <div class="v14-grid">
+            <div>
+                <label class="field-label" for="v14-select">Lista desplegable / seleccionable (haz clic para ver detalle)</label>
+                <select id="v14-select" size="12" onchange="selectValidas14ById(this.value)" style="width:100%; height:52vh; background:#090D16; color:#F8FAFC; border:1px solid var(--border-subtle); border-radius:12px; padding:6px; font-size:0.8rem;">
+                    <option value="">Cargando...</option>
+                </select>
+            </div>
+            <div class="v14-detail-box" id="v14-detail">
+                <p style="color:var(--text-muted); font-size:0.84rem;">Selecciona una oferta de la lista para ver sus detalles, descripción, estado y abrir su enlace.</p>
+            </div>
+        </div>
+    </form>
+</dialog>
+
 <div id="toast"></div>
 
 <script>
@@ -1002,6 +1239,12 @@ HTML_PAGE = """<!DOCTYPE html>
             document.getElementById("kpi-total").textContent = d.total_postulaciones;
             document.getElementById("kpi-email-sub").textContent = `${d.con_email_directo} con correo directo de reclutador`;
             document.getElementById("kpi-activas").textContent = d.postuladas_activas;
+            const kActSub = document.getElementById("kpi-activas-sub");
+            if (kActSub) kActSub.textContent = `Confirmadas en navegador · Cerradas: ${d.cerradas_total ?? 0}`;
+            const kValTxt = document.getElementById("kpi-validas-text");
+            if (kValTxt) kValTxt.textContent = `Válidas disponibles: ${d.validas_disponibles ?? 0}`;
+            const btnRev = document.getElementById("btn-revisar-14");
+            if (btnRev) btnRev.textContent = `🔍 Revisar Válidas (${d.validas_disponibles ?? 0} / 14 Portales)`;
             document.getElementById("kpi-cola").textContent = d.en_cola_1clic;
 
             const kDaemon = document.getElementById("kpi-daemon");
@@ -1309,7 +1552,151 @@ HTML_PAGE = """<!DOCTYPE html>
         ]);
     }
 
+    let V14_DATA = { counts: {}, items: [] };
+    let V14_CAT = "validas";
+    let V14_FILTERED = [];
+
+    async function openValidas14Modal(initialCat = "validas") {
+        V14_CAT = initialCat || "validas";
+        const dlg = document.getElementById("validas14Dialog");
+        if (dlg && !dlg.open) dlg.showModal();
+        try {
+            const res = await fetch("/api/ofertas-14-portales");
+            V14_DATA = await res.json();
+        } catch (e) {
+            showToast("❌ Error cargando ofertas de los 14 portales");
+            return;
+        }
+        const c = V14_DATA.counts || {};
+        ["validas", "postuladas", "pausadas", "cerradas", "cola_ia"].forEach(k => {
+            const sp = document.getElementById("v14-c-" + k);
+            if (sp) sp.textContent = String(c[k] ?? 0);
+        });
+        const selP = document.getElementById("v14-portal");
+        if (selP && selP.options.length <= 1) {
+            const portalesUnicos = [...new Set((V14_DATA.items || []).map(x => x.portal).filter(Boolean))].sort();
+            portalesUnicos.forEach(pt => {
+                const o = document.createElement("option");
+                o.value = pt;
+                o.textContent = pt;
+                selP.appendChild(o);
+            });
+        }
+        const sumEl = document.getElementById("v14-summary-line");
+        if (sumEl) {
+            sumEl.textContent = `Total BD: ${c.total ?? 0} · ✅ Válidas bot: ${c.validas ?? 0} · 🟢 Postulados: ${c.postuladas ?? 0} · 🟡 Pausadas/CAPTCHA: ${c.pausadas ?? 0} · 🔴 Cerradas: ${c.cerradas ?? 0} · 📦 Otras Cola IA: ${c.cola_ia ?? 0}`;
+        }
+        setValidas14Tab(V14_CAT);
+    }
+
+    function setValidas14Tab(cat) {
+        V14_CAT = cat;
+        document.querySelectorAll(".v14-tab").forEach(btn => {
+            btn.classList.toggle("active", btn.getAttribute("data-cat") === cat);
+        });
+        renderValidas14List();
+    }
+
+    function renderValidas14List() {
+        const q = (document.getElementById("v14-search")?.value || "").trim().toLowerCase();
+        const pt = document.getElementById("v14-portal")?.value || "Todos";
+        const all = (V14_DATA.items || []).filter(x => x.categoria === V14_CAT);
+        V14_FILTERED = all.filter(x => {
+            if (pt !== "Todos" && x.portal !== pt) return false;
+            if (q) {
+                const blob = `${x.id} ${x.titulo || ""} ${x.empresa || ""} ${x.portal || ""} ${x.ubicacion || ""} ${x.notas || ""}`.toLowerCase();
+                if (!blob.includes(q)) return false;
+            }
+            return true;
+        });
+
+        const labels = {
+            validas: "Ofertas Válidas Disponibles (listas para postular en 14 portales)",
+            postuladas: "Postulados Confirmados",
+            pausadas: "Ofertas Pausadas / CAPTCHA / Requieren Login Manual",
+            cerradas: "Ofertas Cerradas / Expiradas / Descartadas",
+            cola_ia: "Otras en Cola IA (excluidas por filtro estricto TI/Práctica RM)"
+        };
+        document.getElementById("v14-big-count").textContent = String(V14_FILTERED.length);
+        document.getElementById("v14-big-label").textContent = labels[V14_CAT] || "Ofertas";
+
+        const sel = document.getElementById("v14-select");
+        if (!V14_FILTERED.length) {
+            sel.innerHTML = `<option value="">(0 ofertas en esta categoría/filtro)</option>`;
+            document.getElementById("v14-detail").innerHTML = `<p style="color:var(--text-muted); font-size:0.84rem;">No hay ofertas en esta vista. Cambia de pestaña arriba (por ejemplo Postulados, Pausadas/CAPTCHA, Cerradas u Otras en Cola IA).</p>`;
+            return;
+        }
+        sel.innerHTML = V14_FILTERED.map((o, idx) =>
+            `<option value="${o.id}" ${idx === 0 ? "selected" : ""}>#${o.id} · [${escapeHtml(o.portal)}] ${escapeHtml(o.empresa)} — ${escapeHtml((o.titulo || "").slice(0, 62))}</option>`
+        ).join("");
+        selectValidas14ById(V14_FILTERED[0].id);
+    }
+
+    function selectValidas14ById(idVal) {
+        const oid = parseInt(idVal, 10);
+        const item = V14_FILTERED.find(x => Number(x.id) === oid);
+        const box = document.getElementById("v14-detail");
+        if (!item || !box) return;
+        const urlOk = item.url_oferta && String(item.url_oferta).startsWith("http");
+        const linkHtml = urlOk
+            ? `<a class="btn-link btn-sky" href="${escapeHtml(item.url_oferta)}" target="_blank" rel="noopener">🌐 Abrir Oferta en Navegador</a>`
+            : `<span class="badge" style="background:rgba(148,163,184,0.16); color:#94A3B8;">Sin URL directa registrada</span>`;
+        const emailHtml = item.mailto_url
+            ? `<a class="btn-link btn-emerald" href="${escapeHtml(item.mailto_url)}">✉️ Correo (${escapeHtml(item.email_reclutador)})</a>`
+            : "";
+        let qaHtml = "";
+        try {
+            const parsedQa = typeof item.respuestas_formulario === "string" ? JSON.parse(item.respuestas_formulario || "{}") : (item.respuestas_formulario || {});
+            const ents = Object.entries(parsedQa);
+            if (ents.length) {
+                qaHtml = `<div style="margin-top:10px; font-weight:700; color:#38BDF8; font-size:0.78rem;">Respuestas IA preparadas:</div>` +
+                    ents.map(([q, a]) => `<div class="qa-item"><div class="qa-q">${escapeHtml(q)}</div><div class="qa-a">${escapeHtml(a)}</div></div>`).join("");
+            }
+        } catch (e) {}
+
+        box.innerHTML = `
+            <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start; flex-wrap:wrap; margin-bottom:8px;">
+                <div>
+                    <span class="badge badge-portal">#${item.id} · ${escapeHtml(item.portal)}</span>
+                    <span class="badge badge-score">${Number(item.score_duoc || 90)}% Duoc</span>
+                </div>
+                <span style="font-size:0.78rem; font-weight:700; color:#FBBF24;">${escapeHtml(item.estado || "")}</span>
+            </div>
+            <h3 style="font-size:1.02rem; color:#F8FAFC; margin-bottom:4px;">${escapeHtml(item.titulo || "")}</h3>
+            <div style="font-size:0.84rem; color:#CBD5E1; margin-bottom:8px;">
+                🏢 <strong>${escapeHtml(item.empresa || "")}</strong> · 📍 ${escapeHtml(item.ubicacion || "RM")} · 💼 ${escapeHtml(item.modalidad || "Presencial")} · 💰 ${escapeHtml(item.asignacion_dinero || "Práctica")}
+            </div>
+            <div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:10px;">
+                📅 Oferta: ${escapeHtml(item.fecha_oferta || "--")} · Postulación: ${escapeHtml(item.fecha_postulacion || "--")}
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
+                ${linkHtml}
+                <button type="button" class="btn-emerald" onclick="launchSingleOffer(${item.id})">🤖 Postular #${item.id} en Brave</button>
+                ${emailHtml}
+            </div>
+            ${item.notas ? `<div style="background:rgba(245,158,11,0.10); border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:8px 10px; font-size:0.77rem; color:#FDE68A; margin-bottom:10px;"><strong>Notas:</strong> ${escapeHtml(item.notas)}</div>` : ""}
+            <div style="font-size:0.78rem; font-weight:700; color:#94A3B8; margin-bottom:4px;">Descripción / Detalle:</div>
+            <div style="font-size:0.8rem; color:#CBD5E1; white-space:pre-wrap; line-height:1.45; background:#070A12; border:1px solid var(--border-subtle); border-radius:8px; padding:10px;">${escapeHtml((item.descripcion || "Sin descripción almacenada.").slice(0, 3500))}</div>
+            ${qaHtml}
+        `;
+    }
+
+    async function launchSingleOffer(oid) {
+        showToast(`🤖 Lanzando oferta #${oid} en Brave (30s)...`);
+        const res = await fetch("/api/start-single-offer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: oid })
+        });
+        const d = await res.json();
+        showToast(d.ok ? `✅ Oferta #${oid} abierta en el bot de pantalla.` : `⚠️ ${d.error || "No se pudo lanzar"}`);
+        setTimeout(refreshAll, 2000);
+    }
+
     refreshAll();
+    if (window.location.hash === "#validas14") {
+        setTimeout(() => openValidas14Modal("validas"), 350);
+    }
     setInterval(refreshAll, 15000);
 </script>
 </body>
@@ -1624,6 +2011,8 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
             self._send_json(obtener_respuestas_aprendidas())
         elif parsed.path == "/api/stats":
             self._send_json(get_stats())
+        elif parsed.path == "/api/ofertas-14-portales":
+            self._send_json(get_ofertas_14_portales())
         elif parsed.path == "/api/portales":
             init_db()
             self._send_json(obtener_catalogo_portales())
@@ -1698,19 +2087,27 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
                     return
                 pend = contar_pendientes_validas()
                 if pend == 0:
-                    hablar_no_bloqueante("No hay ofertas válidas pendientes en cola. Usa Escanear 14 Portales primero o revisa las pausadas en el panel.")
-                    self._send_json({"ok": False, "empty_queue": True, "pendientes": 0, "error": "No hay ofertas válidas pendientes (RM + Perfil TI). Pulsa '🌐 Escanear 14 Portales Ahora' o revisa las pausadas/CAPTCHA."})
+                    hablar_no_bloqueante("No hay ofertas válidas pendientes en cola. Usa Revisar Válidas o Escanear 14 Portales primero.")
+                    self._send_json({"ok": False, "empty_queue": True, "pendientes": 0, "error": "No hay ofertas válidas pendientes (RM + Perfil TI). Pulsa '🔍 Revisar Válidas' o '🌐 Escanear 14 Portales Ahora'."})
                     return
-                env = os.environ.copy()
-                env["DISPLAY"] = ":0"
-                env["XAUTHORITY"] = "/home/dhamit/.Xauthority"
-                subprocess.Popen(
-                    ["/home/dhamit/Documentos/MYCreIAtedAPPs/AutoPostula/bot_pantalla.sh", "--segundos", "30"],
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
+                _launch_bot_process(["--segundos", "30"])
                 self._send_json({"ok": True, "modo": "interactivo", "pendientes": pend})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
+
+        elif parsed.path == "/api/start-single-offer":
+            try:
+                data = self._read_json()
+                oid = int(data.get("id") or 0)
+                if not oid:
+                    self._send_json({"ok": False, "error": "ID de oferta requerido"}, status=400)
+                    return
+                running, pid = is_bot_running()
+                if running:
+                    self._send_json({"ok": False, "already_running": True, "error": f"Detén primero el bot activo (PID {pid}) antes de lanzar la oferta #{oid}."})
+                    return
+                _launch_bot_process(["--id", str(oid), "--segundos", "30"])
+                self._send_json({"ok": True, "id": oid})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
 
@@ -1725,22 +2122,14 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
                     hablar_no_bloqueante("No hay ofertas válidas pendientes en cola para postular en segundo plano.")
                     self._send_json({"ok": False, "empty_queue": True, "pendientes": 0, "error": "No hay ofertas válidas pendientes (RM + Perfil TI). Pulsa '🌐 Escanear 14 Portales Ahora'."})
                     return
-                env = os.environ.copy()
-                env["DISPLAY"] = ":0"
-                env["XAUTHORITY"] = "/home/dhamit/.Xauthority"
-                subprocess.Popen(
-                    ["/home/dhamit/Documentos/MYCreIAtedAPPs/AutoPostula/bot_pantalla.sh", "--segundos", "0", "--no-focus"],
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
+                _launch_bot_process(["--segundos", "0", "--no-focus"])
                 self._send_json({"ok": True, "modo": "segundo_plano", "pendientes": pend})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
 
         elif parsed.path == "/api/stop-bot":
             try:
-                subprocess.run(["pkill", "-SIGTERM", "-f", "bucle_pantalla_interactivo.py"], check=False)
+                _stop_bot_processes()
                 self._send_json({"ok": True})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
@@ -1787,7 +2176,10 @@ class AutoPostulaHandler(BaseHTTPRequestHandler):
                 u = r["url_oferta"] or ""
                 if u.startswith("http"):
                     try:
-                        subprocess.Popen(["brave-browser", u], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        if sys.platform != "win32" and shutil.which("brave-browser"):
+                            subprocess.Popen(["brave-browser", u], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        else:
+                            webbrowser.open(u)
                         cur.execute("UPDATE postulaciones SET estado = '🟡 Postulado (Abierta en Brave)', metodo_postulacion = 'abierta_en_brave' WHERE id = ?;", (r["id"],))
                         abiertas += 1
                         time.sleep(0.35)

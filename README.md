@@ -1,7 +1,7 @@
 # 🐧 AutoPostula · Edición Linux Base Debian / Ubuntu
 
 > **💻 Sistema Operativo Compatible:** **Linux Base Debian** (Debian 12+, Ubuntu 22.04/24.04+, Xubuntu, Linux Mint, Kali Linux) con entorno gráfico X11/Wayland.  
-> **🪟 ¿Buscas la versión para Windows 11?** Mantuvimos intacto el repositorio separado de Windows en: [lascsentinel-commits/AutoPostula](https://github.com/lascsentinel-commits/AutoPostula).
+> **🪟 ¿Buscas la versión para Windows 11?** El repositorio dedicado de **Windows 11** está en: [lascsentinel-commits/AutoPostula](https://github.com/lascsentinel-commits/AutoPostula). Ambas ediciones comparten funcionalidades y la guía técnica en [`GUIA_PORTABILIDAD_WINDOWS_LINUX.md`](./GUIA_PORTABILIDAD_WINDOWS_LINUX.md).
 
 Sistema de postulación asistida con IA sobre pantalla real para ofertas de **Prácticas Profesionales y Empleos Técnicos** en los principales portales laborales de Chile (**FirstJob, Trabajando.cl, Computrabajo, Laborum, ChileTrabajos, DuocLaboral, LinkedIn, Prácticas Chile**).
 
@@ -9,12 +9,15 @@ Sistema de postulación asistida con IA sobre pantalla real para ofertas de **Pr
 - 👁️ **Visualización en Vivo (Brave CDP puerto `9222`):** Ves cada pestaña abierta y cada respuesta escrita en pantalla real sin bloqueos de Cloudflare.
 - 🧠 **Memoria Activa de Respuestas en Tiempo Real (`/memoria`):** Cualquier edición que hagas en pantalla se guarda automáticamente tras ~1.2s incluso en pausa, con panel web CRUD en `http://localhost:8087/memoria` para crear, modificar o borrar preguntas y respuestas.
 - 🔊 **Voz Neural Nativa `Di` (`edge-tts` + Cola FIFO en VLC):** Narración en vivo de cada pregunta y respuesta con prioridad `--final` (`bin/habla.sh` + `bin/play_vlc_managed.sh`).
-- ⏱️ **Ventanita Flotante de Control:**
+- **🔍 Visor y Botón «Revisar Válidas (14 Portales)» (`web_dashboard.py` + widget):** Muestra un cuadro destacado y total en grande, separa **Válidas Disponibles**, **Postulados Confirmados**, **Pausadas / CAPTCHA / Login**, **Ofertas Cerradas** y **Otras en Cola IA**, con lista seleccionable, descripción completa, enlace directo para abrirla y postulación 1-a-1 (`POST /api/start-single-offer`).
+- **⏱️ Ventanita Flotante de Control (`v4.9` con watchdog de latido 10s):**
   - `[ ⏸️ Pausar Bot ]` / `[ ▶️ Reanudar Bot ]`
-  - Selectores de espera dinámicos `[ 15s ]`, `[ 30s ]`, `[ 60s ]`, `[ 2m ]`
-  - `[ 🚀 Enviar Postulación Ahora ]` y `[ 🧠 Ver / Editar Memoria (Q&A) ]`
-  - `[ 🛑 Detener Bot por Completo ]`
-- 🛡️ **Verificación Estricta:** Prohibición total de cerrar pestañas si no existe confirmación visual de éxito en pantalla.
+  - Selectores de espera dinámicos `[ 15s ]`, `[ 30s ]`, `[ 60s ]`, `[ 2m ]` y límite de pestañas (`- / +`)
+  - `[ 🔊 Leer Preguntas y Respuestas: ON/OFF ]` + `[ 🔇 Lectura Auto Descripción ]`
+  - `[ 🚀 Enviar Postulación Ahora ]`, `[ ⬅️ Link anterior ]`, `[ ⏭️ Siguiente oferta ]`
+  - `[ 🕵️ Agente investigador ]`, `[ 🧠 Ver / Editar Memoria (Q&A) ]`, `[ 🔍 Revisar Válidas (14 Portales) ]` y `[ 🛑 Detener Bot por Completo ]`
+- **⏱️ Espera Post-Envío de 35s + Aviso 5s Antes:** Tras confirmar postulación, anuncia *"Ya postulamos a {empresa}, esperaré 35 segundos para cerrar la pestaña"* y *"Cerrando"* 5s antes.
+- **🛡️ Verificación Estricta y Portales Mapeados:** Detección de páginas 404/cerradas, login Google OAuth (`FirstJob`, `Workday`), actualización de CV PDF vía Jobi (`Laborum`), confirmación `/candidate/postapply` (`Computrabajo`), y respeto de CAPTCHAs sin automatizar (`DuocLaboral`, `Indeed`, `Turnstile`). Ver especificaciones en [`GUIA_PORTABILIDAD_WINDOWS_LINUX.md`](./GUIA_PORTABILIDAD_WINDOWS_LINUX.md).
 
 ---
 

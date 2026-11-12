@@ -494,7 +494,7 @@ _WIDGET_JS = """
         }
         return;
     }
-    const WIDGET_VER = '4.8';
+    const WIDGET_VER = '4.9';
     window.__autopostula_widget_version = WIDGET_VER;
     if (window.__autopostula_interval && window.__autopostula_interval_ver !== WIDGET_VER) {
         clearInterval(window.__autopostula_interval);
@@ -724,6 +724,10 @@ _WIDGET_JS = """
                     🧠 Ver / Editar Memoria (Q&A)
                 </button>
 
+                <button id="autopostula-modal-validas14" style="background:linear-gradient(135deg,#0ea5e9,#0284c7); border:1px solid #38bdf8; border-radius:10px; color:#ffffff; font-size:12px; font-weight:800; padding:7px; cursor:pointer;">
+                    🔍 Revisar Válidas (14 Portales)
+                </button>
+
                 <button id="autopostula-modal-stop-bot" style="background:transparent; border:1px solid #ef4444; border-radius:10px; color:#ef4444; font-size:12px; font-weight:700; padding:6px; cursor:pointer;">
                     🛑 Detener Bot por Completo
                 </button>
@@ -922,6 +926,14 @@ _WIDGET_JS = """
                 pushCmd('pause', true);
                 updateWidgetState();
                 window.open('http://localhost:8087/memoria', '_blank');
+            });
+
+            modal.querySelector('#autopostula-modal-validas14')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                window.__autopostula_paused = true;
+                pushCmd('pause', true);
+                updateWidgetState();
+                window.open('http://localhost:8087/#validas14', '_blank');
             });
 
             modal.querySelector('#autopostula-modal-stop-bot')?.addEventListener('click', (e) => {
@@ -1194,7 +1206,7 @@ async def sincronizar_widgets_navegador(browser):
                 return {
                     ready: (
                         typeof window.__autopostula_sync_state === 'function' &&
-                        window.__autopostula_widget_version === '4.8' &&
+                        window.__autopostula_widget_version === '4.9' &&
                         document.querySelectorAll('#autopostula-root-container').length === 1 &&
                         !!document.getElementById('autopostula-modal-readqa')
                     ),
